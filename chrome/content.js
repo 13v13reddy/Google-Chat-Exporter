@@ -929,7 +929,7 @@ function checkpointScope(href, format, includeMedia) {
     const match = route.match(/(?:#chat\/|\/app\/|\/)(?:(dm|space|room|chat)\/)([A-Za-z0-9_-]+)/);
     if (!match) return '';
     const account = url.pathname.match(/\/u\/([^/]+)/)?.[1] || url.searchParams.get('authuser') || '0';
-    const mode = format === 'txt' ? 'txt' : includeMedia ? 'html-media' : 'html';
+    const mode = format === 'md' ? 'md' : format === 'txt' ? 'txt' : includeMedia ? 'html-media' : 'html';
     return `${url.hostname}|${account}|${match[1]}|${match[2]}|${mode}`;
   } catch { return ''; }
 }
@@ -1051,7 +1051,7 @@ async function contentCheckpointScope(messages, conversationName, format, includ
     if (['chat.google.com', 'mail.google.com'].includes(url.hostname)) host = url.hostname;
     account = url.pathname.match(/\/u\/([^/]+)/)?.[1] || url.searchParams.get('authuser') || '0';
   } catch { /* retain conservative defaults */ }
-  const mode = format === 'txt' ? 'txt' : includeMedia ? 'html-media' : 'html';
+  const mode = format === 'md' ? 'md' : format === 'txt' ? 'txt' : includeMedia ? 'html-media' : 'html';
   const titleHash = await hashCheckpointValue(cleanText(conversationName).toLocaleLowerCase());
   return `${host}|${account}|content|${titleHash}|${anchors.join('.')}|${mode}`;
 }
@@ -1292,7 +1292,7 @@ async function startAutoExport(key) {
   const settings = resp.settings || {};
   autoExportKey = key;
   const result = await runExport({
-    format: settings.format === 'html' ? 'html' : 'txt',
+    format: ['txt', 'md', 'html'].includes(settings.format) ? settings.format : 'txt',
     loadAll: settings.loadAll !== false,
     includeMedia: settings.includeMedia !== false,
     dateFrom: settings.dateFrom || '',

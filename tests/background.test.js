@@ -6,8 +6,8 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadBackground() {
-  const event = { addListener() {} };
+function loadBackground(target = 'chrome') {
+  const event = () => ({ addListener(fn) { this.listener = fn; } });
   const stored = {};
   const session = {};
   const chrome = {
@@ -16,8 +16,8 @@ function loadBackground() {
       async setBadgeText({ text }) { this.badge = text; },
       async setBadgeBackgroundColor() {}
     },
-    runtime: { onInstalled: event, onMessage: { addListener(fn) { this.listener = fn; } }, async sendMessage() {}, lastError: null },
-    contextMenus: { removeAll(callback) { callback(); }, create() {}, onClicked: event },
+    runtime: { onInstalled: event(), onMessage: { addListener(fn) { this.listener = fn; } }, async sendMessage() {}, lastError: null },
+    contextMenus: { removeAll(callback) { callback(); }, create() {}, onClicked: event() },
     tabs: { async query() { return []; }, async sendMessage() {} },
     scripting: { async executeScript() {} },
     storage: { local: {
@@ -50,7 +50,7 @@ function loadBackground() {
     setTimeout,
     unescape
   });
-  const filename = path.join(__dirname, '..', 'chrome', 'background.js');
+  const filename = path.join(__dirname, '..', target, 'background.js');
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   return context;
 }
@@ -188,4 +188,94 @@ test('triggerDownload converts data URLs to blob URLs in Firefox', async () => {
   assert.equal(dlId, 42);
   assert.ok(passedUrl.startsWith('blob:'), 'Firefox must receive a blob URL instead of data URL');
 });
+
+for (const target of ['chrome', 'firefox']) {
+  test(`${target}: Markdown export preserves literal text, timestamps, and attachment links`, async () => {
+    const c = loadBackground(target);
+    const text = '# Not a transcript heading\n\n```js\nconst value = "<script> & café 👋";\n```\n````\n[last line]';
+    const payload = {
+      conversationName: 'Team [agents] <chat>',
+      exportDate: '2026-11-03T12:30:00.000Z',
+      messages: [
+        {
+          sender: 'Alice *admin*', date: 'November 3, 2026', timestamp: '6:00 AM',
+          absoluteTimestamp: Date.parse('2026-11-03T12:00:00Z'), text,
+          media: [
+            { type: 'image', name: 'photo [1].png', url: 'https://example.com/photo (1).png' },
+            { type: 'audio', name: 'voice.mp3', url: 'https://example.com/voice.mp3', durationMs: 65000 },
+            { type: 'file', name: '<unsafe>.html', url: 'javascript:alert(1)' },
+            { type: 'file', name: 'missing.pdf', url: '' }
+          ]
+        },
+        { sender: 'Bob', date: 'November 3, 2026', timestamp: '6:01 AM', text: 'Second message', media: [] },
+        { date: 'November 4, 2026', media: [{ type: 'file', name: 'report.pdf', url: 'https://example.com/report.pdf' }] }
+      ],
+      history: { warning: 'Only rendered messages <captured>.', since: Date.parse('2026-11-02T00:00:00Z') }
+    };
+    let download;
+    c.chrome.downloads.download = (options, callback) => { download = options; callback(42); };
+    const result = await c.packageMarkdown(payload);
+    const markdown = Buffer.from(download.url.split(',')[1], 'base64').toString('utf8');
+
+    assert.equal(result.downloadId, 42);
+    assert.match(result.filename, /\.md$/);
+    assert.equal(download.filename, result.filename);
+    assert.match(download.url, /^data:text\/markdown;charset=utf-8;base64,/);
+    assert.ok(markdown.startsWith('# Team \\[agents\\] &lt;chat&gt;\n'));
+    assert.match(markdown, /- Messages: 3\n- Exported: 2026-11-03T12:30:00\.000Z/);
+    assert.match(markdown, /- New since: 2026-11-02T00:00:00\.000Z/);
+    assert.match(markdown, /> Warning: Only rendered messages &lt;captured&gt;\./);
+    assert.ok(markdown.includes('### Alice \\*admin\\* — 2026-11-03T12:00:00.000Z'));
+    assert.ok(markdown.includes('`````text\n' + text + '\n`````\n'), 'a longer fence preserves nested code and raw HTML as literal text');
+    assert.equal((markdown.match(/^## November 3, 2026$/gm) || []).length, 1);
+    assert.match(markdown, /## November 4, 2026/);
+    assert.match(markdown, /### Bob — 6:01 AM/);
+    assert.match(markdown, /### Unknown — Time unknown/);
+    assert.ok(markdown.includes('- Image: [photo \\[1\\].png](<https://example.com/photo%20(1).png>)'));
+    assert.ok(markdown.includes('- Audio: [voice.mp3](<https://example.com/voice.mp3>) (1:05)'));
+    assert.ok(markdown.includes('- File: &lt;unsafe&gt;.html [unavailable]'));
+    assert.ok(markdown.includes('- File: missing.pdf [unavailable]'));
+    assert.ok(markdown.includes('- File: [report.pdf](<https://example.com/report.pdf>)'));
+    assert.doesNotMatch(markdown, /javascript:/);
+    assert.ok(markdown.endsWith('\n'));
+  });
+
+  test(`${target}: Markdown uses the download route and commits its checkpoint only on completion`, async () => {
+    const c = loadBackground(target);
+    const key = 'gceCheckpoint:' + 'c'.repeat(64);
+    const checkpoint = { key, value: { timestamp: 100, fingerprints: ['d'.repeat(64)] } };
+    let download;
+    let state = 'in_progress';
+    c.chrome.downloads.download = (options, callback) => { download = options; callback(7); };
+    c.chrome.downloads.search = async () => [{ state }];
+    const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({
+      action: 'packageAndDownload', format: 'md',
+      payload: { conversationName: 'Fixture', messages: [], exportDate: '2026-11-03T12:00:00Z', checkpoint }
+    }, {}, resolve));
+
+    assert.equal(response.success, true);
+    assert.match(response.filename, /\.md$/);
+    assert.match(download.url, /^data:text\/markdown;/);
+    assert.equal((await c.chrome.storage.local.get(key))[key], undefined);
+    state = 'complete';
+    c.chrome.downloads.onChanged.listener({ id: 7, state: { current: state } });
+    await vm.runInContext('checkpointQueue', c);
+    assert.equal((await c.chrome.storage.local.get(key))[key].timestamp, 100);
+  });
+
+  test(`${target}: Markdown context menu starts a Markdown export`, async () => {
+    const c = loadBackground(target);
+    const menus = [];
+    c.chrome.contextMenus.create = menu => menus.push(menu);
+    c.chrome.runtime.onInstalled.listener();
+    const menu = menus.find(item => item.id === 'export_md');
+    assert.ok(menu);
+    assert.ok(menu.documentUrlPatterns.includes('https://mail.google.com/*'));
+    const calls = [];
+    c.triggerExport = async (tab, format) => calls.push({ tab, format });
+    const tab = { id: 7, url: 'https://chat.google.com/u/0/app/chat/ABC' };
+    await c.chrome.contextMenus.onClicked.listener({ menuItemId: menu.id }, tab);
+    assert.deepEqual(calls, [{ tab, format: 'md' }]);
+  });
+}
 

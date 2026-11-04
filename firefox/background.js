@@ -76,6 +76,16 @@ chrome.runtime.onInstalled.addListener(() => {
     });
 
     chrome.contextMenus.create({
+      id: 'export_md',
+      title: '📝 Export Chat as Markdown',
+      contexts: ['all'],
+      documentUrlPatterns: [
+        'https://chat.google.com/*',
+        'https://mail.google.com/*'
+      ]
+    });
+
+    chrome.contextMenus.create({
       id: 'export_html',
       title: '🌐 Export Chat as HTML (with media)',
       contexts: ['all'],
@@ -90,7 +100,8 @@ chrome.runtime.onInstalled.addListener(() => {
 // ── Context Menu Click Handler ──────────────────────────────
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  const format = info.menuItemId === 'export_html' ? 'html' : 'txt';
+  const format = { export_txt: 'txt', export_md: 'md', export_html: 'html' }[info.menuItemId];
+  if (!format) return;
   try {
     await triggerExport(tab, format);
   } catch (err) {
@@ -220,7 +231,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         const result = msg.format === 'html'
           ? await packageHtml(msg.payload)
-          : await packageTxt(msg.payload);
+          : msg.format === 'md'
+            ? await packageMarkdown(msg.payload)
+            : await packageTxt(msg.payload);
         let checkpointWarning = '';
         if (msg.payload.checkpoint) {
           try { await queueCheckpoint(result.downloadId, msg.payload.checkpoint); }
@@ -448,6 +461,66 @@ async function packageTxt({ conversationName, messages, exportDate, history }) {
 
   const downloadId = await triggerDownload(dataUrl, filename);
   return { filename, downloadId };
+}
+
+// ── Markdown Packaging ──────────────────────────────────────
+
+async function packageMarkdown(payload) {
+  const filename = `${sanitize(payload.conversationName)}_${dateStr()}.md`;
+  const dataUrl = 'data:text/markdown;charset=utf-8;base64,' + b64EncodeUtf8(generateMarkdown(payload));
+  const downloadId = await triggerDownload(dataUrl, filename);
+  return { filename, downloadId };
+}
+
+function generateMarkdown({ conversationName, messages, exportDate, history }) {
+  const lines = [
+    `# ${escapeMarkdownLabel(conversationName || 'Google Chat')}`,
+    '',
+    `- Messages: ${messages.length}`,
+    `- Exported: ${new Date(exportDate).toISOString()}`,
+    ...(history?.since ? [`- New since: ${new Date(history.since).toISOString()}`] : []),
+    ''
+  ];
+  if (history?.warning) lines.push(`> Warning: ${escapeMarkdownLabel(history.warning)}`, '');
+
+  let lastDate = '';
+  for (const msg of messages) {
+    if (msg.date && msg.date !== lastDate) {
+      lines.push(`## ${escapeMarkdownLabel(msg.date)}`, '');
+      lastDate = msg.date;
+    }
+
+    const absolute = new Date(msg.absoluteTimestamp);
+    const timestamp = msg.absoluteTimestamp && Number.isFinite(absolute.getTime())
+      ? absolute.toISOString() : msg.timestamp || 'Time unknown';
+    lines.push(`### ${escapeMarkdownLabel(msg.sender || 'Unknown')} — ${escapeMarkdownLabel(timestamp)}`, '');
+
+    if (msg.text) {
+      // Preserve chat text literally, including HTML and nested code fences.
+      const text = msg.text.replace(/\r\n?/g, '\n');
+      const fenceLength = (text.match(/`+/g) || []).reduce((length, run) => Math.max(length, run.length + 1), 3);
+      const fence = '`'.repeat(fenceLength);
+      lines.push(`${fence}text`, text, fence, '');
+    }
+
+    for (const media of msg.media || []) {
+      const type = { image: 'Image', gif: 'GIF', audio: 'Audio', video: 'Video', file: 'File' }[media.type] || 'Attachment';
+      const name = escapeMarkdownLabel(media.name || media.type || 'attachment');
+      const url = safeResourceUrl(media.url);
+      const duration = media.durationMs ? ` (${fmtDur(media.durationMs)})` : '';
+      lines.push(`- ${type}: ${url ? `[${name}](<${url}>)` : `${name} [unavailable]`}${duration}`);
+    }
+    if (msg.media?.length) lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
+function escapeMarkdownLabel(value) {
+  return String(value ?? '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/[\\`*_{}\[\]#!|~]/g, '\\$&');
 }
 
 // ── HTML + ZIP Packaging ────────────────────────────────────

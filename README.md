@@ -7,7 +7,7 @@
 [![Chrome Web Store](https://img.shields.io/badge/Chrome%20Extension-Available-blue.svg)](https://chromewebstore.google.com/detail/google-chat-exporter/epemodmmmilflmhgojgonhfcjfjnflgc)
 [![Firefox Add-on](https://img.shields.io/badge/Firefox%20Add--on-Available-orange.svg)](https://addons.mozilla.org/en-US/firefox/addon/google-chat-exporter/)
 
-The ultimate, privacy-first browser extension for exporting Google Chat conversations to **Plain Text (TXT)** or **rich HTML with full media attachments (packaged in a ZIP)**.
+The ultimate, privacy-first browser extension for exporting Google Chat conversations to **Plain Text (TXT)**, **Markdown (MD)**, or **rich HTML with full media attachments (packaged in a ZIP)**.
 
 Works across **Google Chrome, Mozilla Firefox, Brave, Microsoft Edge**, standalone PWA windows, and Gmail-embedded Chat.
 
@@ -15,13 +15,14 @@ Works across **Google Chrome, Mozilla Firefox, Brave, Microsoft Edge**, standalo
 
 ## ✨ Features
 
-- **Dual Export Formats**:
+- **Three Export Formats**:
   - **Plain Text (`.txt`)**: Clean, formatted chronological transcript with senders, timestamps, and multi-line formatting preserved.
+  - **Markdown (`.md`)**: Agent-friendly transcript with date and sender headings, ISO 8601 UTC timestamps when available, literal message text, and descriptive attachment links. No media downloads or ZIP extraction needed.
   - **Structured HTML (`.html + .zip`)**: Complete conversational archive with sender avatars, speech bubbles, embedded images, GIFs, audio notes, video chips, documents, and Google Meet call links.
 - **Full Media Extraction**: Automatically downloads photos, GIFs, file attachments, and video previews into a neat `media/` folder inside the ZIP.
 - **Adaptive History Loading**: Loads history batch-by-batch and continues as soon as Google Chat adds the next batch.
 - **Optional Date Cutoff**: Stop loading once the export reaches a selected “messages since” date.
-- **New Since Last Export**: Optional per-conversation checkpoints for TXT, HTML, and HTML with attachments. Each run saves a separate file; the first run establishes a baseline. Checkpoints advance after a completed download. Turn the option off for a full re-export.
+- **New Since Last Export**: Optional per-conversation checkpoints for TXT, Markdown, HTML, and HTML with attachments. Each run saves a separate file; the first run establishes a baseline. Checkpoints advance after a completed download. Turn the option off for a full re-export.
 - **Auto-Export on Open**: Turn it on in the popup, then open each channel you want; every channel is exported once with your current settings as soon as it loads. Switching away mid-export cancels that export so it retries on your next visit. The mode turns off after 10 minutes without a channel switch and whenever the browser restarts; an `AUTO` badge shows while it is on.
 - **Concurrent Media Downloads**: Downloads up to four attachments at a time.
 - **Bot & Card Message Support**: Extracts card notifications, webhooks, and bot messages (e.g., alert cards) seamlessly.
@@ -31,7 +32,7 @@ Works across **Google Chrome, Mozilla Firefox, Brave, Microsoft Edge**, standalo
   - Progressive Web App (PWA) / standalone window mode (fully tested and working in Brave & Chrome)
 - **Two Easy Export Methods**:
   - **Popup UI**: Modern toolbar popup with live conversation detection, format selection, and progress monitoring.
-  - **Context Menu**: Right-click anywhere inside a conversation to export as TXT or HTML with media.
+  - **Context Menu**: Right-click anywhere inside a conversation to export as TXT, Markdown, or HTML with media.
 - **Live Animated HUD**: Real-time progress indicator showing message count, scroll progress, and media download status.
 - **100% Private & Client-Side**: All parsing and ZIP generation happen inside your browser. No external servers, no tracking, zero telemetry.
 
@@ -83,19 +84,27 @@ Install directly from your browser's official store:
 1. Navigate to [Google Chat](https://chat.google.com) or Gmail Chat.
 2. Click into any direct message or space.
 3. Choose either method:
-   - **Toolbar Popup**: Click the extension icon in your browser toolbar, select **HTML (with media)** or **TXT**, and click **Export Current Conversation**.
-   - **Right-Click**: Right-click anywhere within the chat message area and select **"📄 Export Chat as TXT"** or **"🌐 Export Chat as HTML (with media)"**.
+   - **Toolbar Popup**: Click the extension icon in your browser toolbar, select **Plain Text**, **Markdown (.md)**, or **HTML + Media**, and click **Export Current Conversation**.
+   - **Right-Click**: Right-click anywhere within the chat message area and select **"📄 Export Chat as TXT"**, **"📝 Export Chat as Markdown"**, or **"🌐 Export Chat as HTML (with media)"**.
 4. The animated status HUD will appear in the bottom-right corner as it scrolls history, extracts messages, and bundles media.
-5. Your export file (`.txt` or `.zip`) will download automatically to your Downloads folder.
+5. Your export file (`.txt`, `.md`, or `.zip`) will download automatically to your Downloads folder.
 
 ### Export options
 
 - **Load Full History** traverses the conversation before exporting. Turn it off to export only currently rendered messages.
 - **Messages Since** stops history loading after reaching the selected date.
-- **New Since Last Export** saves a per-conversation checkpoint and exports only newer messages on subsequent runs. The first run establishes a baseline; TXT, HTML, and HTML-with-media modes use separate checkpoints.
+- **New Since Last Export** saves a per-conversation checkpoint and exports only newer messages on subsequent runs. The first run establishes a baseline; TXT, Markdown, HTML, and HTML-with-media modes use separate checkpoints.
 - **Include Media** downloads attachments when HTML is selected.
 
 Each incremental run creates a new file. Keep earlier files to retain the complete archive. Checkpoints are local to the browser profile and advance only after Chrome reports a completed download.
+
+Thread support is limited: the exporter does not open every thread or preserve parent/reply relationships. Replies already rendered in the page may be included as ordinary messages, but collapsed-thread replies can be missing, even with Load Full History enabled.
+
+### Markdown for agents
+
+Markdown provides explicit message boundaries without HTML styling. Each message has a sender and timestamp heading; its body is preserved in a fenced `text` block, including code snippets, line breaks, and literal Markdown or HTML. Absolute timestamps use UTC; messages without them keep the displayed Chat time. Date headings retain Chat's displayed date labels.
+
+Attachments appear as named links, so agents can identify files without loading binary content. These links may require a Google login or expire. Use HTML with media when you need an archive containing downloaded attachments.
 
 ## ⚡ Performance benchmark
 

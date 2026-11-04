@@ -6,7 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadContent() {
+function loadContent(target = 'chrome') {
   const event = { addListener() {} };
   const selectors = {
     frameName: 'single_full_screen',
@@ -54,7 +54,7 @@ function loadContent() {
     setTimeout,
     window
   });
-  const filename = path.join(__dirname, '..', 'chrome', 'content.js');
+  const filename = path.join(__dirname, '..', target, 'content.js');
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   return context;
 }
@@ -497,4 +497,80 @@ test('export mode tick does not poll background when disabled', async () => {
   c.exportModeTick();
   assert.equal(polled, false, 'must not poll background when export mode is disabled');
 });
+
+for (const target of ['chrome', 'firefox']) {
+  test(`${target}: Markdown checkpoints stay separate from TXT and both HTML modes`, async () => {
+    const c = loadContent(target);
+    const url = 'https://chat.google.com/u/0/app/chat/ABC';
+    const markdown = c.checkpointScope(url, 'md', true);
+    assert.ok(markdown.endsWith('|md'));
+    assert.equal(markdown, c.checkpointScope(url, 'md', false), 'the HTML media toggle does not change Markdown checkpoints');
+    for (const [format, media] of [['txt', false], ['html', false], ['html', true]]) {
+      assert.notEqual(markdown, c.checkpointScope(url, format, media));
+    }
+    const messages = [{ sender: 'A', absoluteTimestamp: 100, text: 'anchor' }];
+    const fallback = await c.contentCheckpointScope(messages, 'Room', 'md', true, url);
+    assert.equal(fallback, await c.contentCheckpointScope(messages, 'Room', 'md', false, url));
+    for (const [format, media] of [['txt', false], ['html', false], ['html', true]]) {
+      assert.notEqual(fallback, await c.contentCheckpointScope(messages, 'Room', format, media, url));
+    }
+  });
+
+  test(`${target}: Markdown exports only new messages and keeps attachments as links`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    c.isInChatFrame = () => true;
+    c.findScrollContainer = () => null;
+    c.getConversationName = () => 'Fixture';
+    c.sleep = async () => {};
+    c.setTimeout = () => 0;
+    c.showProgress = () => {};
+    c.downloadMedia = async () => { assert.fail('Markdown should not fetch attachments'); };
+    let messages = [{ _dedupKey: 'a', absoluteTimestamp: 100, text: 'first', media: [] }];
+    c.scrollToLoadAll = async () => ({ messages, reason: 'idle', warning: '' });
+    const stored = {};
+    c.chrome.storage.local.get = async key => ({ [key]: stored[key] });
+    const packages = [];
+    c.chrome.runtime.sendMessage = async msg => {
+      packages.push(msg);
+      if (msg.payload.checkpoint) stored[msg.payload.checkpoint.key] = msg.payload.checkpoint.value;
+      return { success: true, filename: 'fixture.md' };
+    };
+    const options = { format: 'md', includeMedia: true, incremental: true, sourceUrl: 'https://chat.google.com/u/0/app/chat/ABC' };
+    assert.equal(await c.runExport(options), 'done');
+    messages = [...messages, {
+      _dedupKey: 'b', absoluteTimestamp: 200, text: 'second',
+      media: [{ type: 'file', name: 'report.pdf', url: 'https://example.com/report.pdf' }]
+    }];
+    assert.equal(await c.runExport(options), 'done');
+    assert.equal(packages[1].format, 'md');
+    assert.equal(packages[1].payload.messages.length, 1);
+    assert.equal(packages[1].payload.messages[0].text, 'second');
+    assert.equal(packages[1].payload.messages[0].media[0].url, 'https://example.com/report.pdf');
+    assert.equal(packages[1].payload.mediaFiles.length, 0);
+    assert.ok(packages[1].payload.checkpoint);
+    assert.equal(packages[1].payload.history.since, 100);
+    assert.equal(await c.runExport(options), 'empty');
+    assert.equal(packages.length, 2, 'no new messages creates no empty Markdown file');
+    assert.equal(await c.runExport({ ...options, format: 'txt' }), 'done');
+    assert.equal(packages[2].payload.messages.length, 2, 'TXT keeps its own baseline');
+  });
+
+  test(`${target}: auto-export preserves the saved Markdown format`, async () => {
+    const c = loadContent(target);
+    vm.runInContext("exportModeWatch = { key: 'room', stableTicks: 2, handled: true }", c);
+    const calls = [];
+    const sent = [];
+    c.chrome.runtime.sendMessage = async msg => {
+      sent.push(msg);
+      return msg.action === 'autoExportCandidate' ? { run: true, settings: { format: 'md', incremental: true } } : {};
+    };
+    c.runExport = async options => { calls.push(options); return 'done'; };
+    await c.startAutoExport('room');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].format, 'md');
+    assert.equal(calls[0].incremental, true);
+    assert.ok(sent.some(msg => msg.action === 'autoExportDone' && msg.key === 'room'));
+  });
+}
 
