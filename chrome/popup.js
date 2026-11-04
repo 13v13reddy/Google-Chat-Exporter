@@ -84,7 +84,7 @@ async function detectConversation() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) throw new Error('Open a conversation in Google Chat.');
     const response = await chrome.runtime.sendMessage({ action: 'getConversation', tabId: tab.id });
-    if (response?.protocol !== 1) throw new Error(UPDATE_REQUIRED);
+    if (response?.protocol !== 2) throw new Error(UPDATE_REQUIRED);
     if (!response?.success) throw new Error(response?.error || 'Could not connect to Chat. Refresh the Chat tab and retry.');
     setConvStatus(true, response.name || 'Google Chat');
   } catch (error) {
@@ -160,7 +160,7 @@ async function triggerExport() {
     if (!tab?.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) throw new Error('Open a conversation in Google Chat.');
     const response = await chrome.runtime.sendMessage({ action: 'popupExport', jobId, tabId: tab.id, format: settings.format, settings });
     if (!response?.success) throw new Error(response?.error || 'Could not start export. Try again.');
-    if (response.protocol !== 1 || response.jobId !== jobId) throw new Error(UPDATE_REQUIRED);
+    if (response.protocol !== 2 || response.jobId !== jobId) throw new Error(UPDATE_REQUIRED);
     if (pendingJobId !== jobId && !exportJobs.has(jobId)) return;
     renderExportJobs();
   } catch (error) {
@@ -280,6 +280,7 @@ function renderExportJobs() {
   $('job-name').hidden = !job.conversationName || job.conversationName === $('conv-name').textContent;
   $('job-controls').hidden = jobActive(job) && job.phase === 'packaging';
   $('return-to-chat').hidden = !jobActive(job) || job.phase === 'packaging';
+  $('return-to-chat').textContent = job.collectionWindowId === undefined ? 'Return to Chat' : 'Show export';
   $('cancel-export').hidden = !jobActive(job) || job.phase === 'packaging';
   $('dismiss-status').hidden = jobActive(job);
 }

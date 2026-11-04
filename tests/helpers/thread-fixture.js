@@ -59,7 +59,8 @@ function installThreadFixture(context, options = {}) {
     return [];
   };
   const main = {
-    scrollHeight: 800, clientHeight: 400,
+    get scrollHeight() { return options.narrow && state.active ? 0 : 800; },
+    get clientHeight() { return options.narrow && state.active ? 0 : 400; },
     get scrollTop() { return mainTop; }, set scrollTop(value) { mainTop = Math.max(0, Math.min(400, value)); },
     getBoundingClientRect: () => ({ top: 0 }),
     querySelectorAll: selector => queryMessages(mainMessages(), selector)

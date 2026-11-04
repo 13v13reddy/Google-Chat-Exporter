@@ -114,11 +114,11 @@ for (const target of ['chrome', 'firefox']) {
   test(`${target}: the current worker enables export and preserves a tab-only refresh error`, async () => {
     const p = page(target, 'popup.js');
     p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
-    p.chrome.runtime.sendMessage = async () => ({ success: true, protocol: 1, name: 'Fixture room' });
+    p.chrome.runtime.sendMessage = async () => ({ success: true, protocol: 2, name: 'Fixture room' });
     await p.context.detectConversation();
     assert.equal(p.element('export-btn').disabled, false);
     assert.equal(p.element('conv-name').textContent, 'Fixture room');
-    p.chrome.runtime.sendMessage = async () => ({ success: false, protocol: 1, error: 'Refresh the Chat tab to finish updating the extension.' });
+    p.chrome.runtime.sendMessage = async () => ({ success: false, protocol: 2, error: 'Refresh the Chat tab to finish updating the extension.' });
     await p.context.detectConversation();
     assert.match(p.element('connection-error').textContent, /^Refresh the Chat tab/);
   });
@@ -190,7 +190,7 @@ for (const target of ['chrome', 'firefox']) {
     await loading;
     assert.equal(p.element('export-btn').disabled, true);
     assert.match(p.element('status-text').textContent, /Starting/);
-    accept({ success: true, protocol: 1, jobId: requested.jobId });
+    accept({ success: true, protocol: 2, jobId: requested.jobId });
     await starting;
     p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: requested.jobId, state: 'working', phase: 'history', text: 'Loading messages', percent: 15, startedAt: 20, revision: 1 } });
     assert.equal(p.element('status-text').textContent, 'Loading messages');
@@ -208,7 +208,7 @@ for (const target of ['chrome', 'firefox']) {
     const p = page(target, 'popup.js');
     let requested;
     p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
-    p.chrome.runtime.sendMessage = async message => { requested = message; return { success: true, protocol: 1, jobId: message.jobId }; };
+    p.chrome.runtime.sendMessage = async message => { requested = message; return { success: true, protocol: 2, jobId: message.jobId }; };
     await p.context.triggerExport();
     assert.ok(p.timers.size > 0, 'starting cannot spin forever without a job update');
     [...p.timers.values()][0]();
@@ -233,7 +233,7 @@ for (const target of ['chrome', 'firefox']) {
     await first;
     assert.equal(p.element('export-btn').disabled, true);
     assert.match(p.element('status-text').textContent, /Starting/);
-    requests[1].resolve({ success: true, protocol: 1, jobId: requests[1].message.jobId });
+    requests[1].resolve({ success: true, protocol: 2, jobId: requests[1].message.jobId });
     await retry;
     p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: requests[1].message.jobId, state: 'working', phase: 'history', text: 'Loading retry', percent: 15, startedAt: 20, revision: 1 } });
     assert.equal(p.element('status-text').textContent, 'Loading retry');
@@ -328,12 +328,16 @@ for (const target of ['chrome', 'firefox']) {
     assert.equal(p.element('job-name').textContent, 'Fixture space');
     assert.equal(p.element('export-btn').disabled, true);
     assert.equal(p.element('return-to-chat').hidden, false);
+    assert.equal(p.element('return-to-chat').textContent, 'Return to Chat');
     assert.equal(p.element('cancel-export').hidden, false);
     assert.equal(p.element('dismiss-status').hidden, true);
     assert.equal(p.timers.size, 0, 'a paused export never disappears on a timer');
+    job = { ...job, collectionWindowId: 9, revision: 2 };
+    await p.context.loadExportJobs();
+    assert.equal(p.element('return-to-chat').textContent, 'Show export');
     await p.context.controlExportJob('focusExportJob');
     assert.ok(calls.some(msg => msg.action === 'focusExportJob' && msg.jobId === 'job-1'));
-    job = { ...job, state: 'error', phase: 'cancelled', text: 'Export cancelled.', revision: 2 };
+    job = { ...job, state: 'error', phase: 'cancelled', text: 'Export cancelled.', revision: 3 };
     await p.context.controlExportJob('cancelExportJob');
     assert.ok(calls.some(msg => msg.action === 'cancelExportJob' && msg.jobId === 'job-1'));
     assert.equal(p.element('status-text').textContent, 'Export cancelled.');

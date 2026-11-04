@@ -3,6 +3,8 @@
 
 const ExportJobs = (() => {
   const KEY = 'gceExportJobs';
+  const WINDOWS_KEY = 'gceCollectionWindows';
+  let collectionWindows = {};
   const owned = new Set();
   let queue = Promise.resolve();
   const active = job => job.state === 'working' || job.state === 'paused';
@@ -17,6 +19,41 @@ const ExportJobs = (() => {
   }
 
   async function read() { return (await chrome.storage.local.get(KEY))[KEY] || {}; }
+
+  async function readWindows() {
+    return chrome.storage.session ? (await chrome.storage.session.get(WINDOWS_KEY))[WINDOWS_KEY] || {} : collectionWindows;
+  }
+
+  async function saveWindows(windows) {
+    if (chrome.storage.session) await chrome.storage.session.set({ [WINDOWS_KEY]: windows });
+    else collectionWindows = windows;
+  }
+
+  async function isCollectionTab(tabId) {
+    if (!Number.isInteger(tabId)) return false;
+    return Object.values(await readWindows()).some(window => window.tabId === tabId);
+  }
+
+  async function closeCollection(job) {
+    const windows = await readWindows();
+    const window = windows[job.jobId];
+    // Session ownership prevents a retained job from closing a reused tab ID
+    // after a browser restart. Close the helper tab, never an entire window.
+    if (!window || window.tabId !== job.tabId || window.windowId !== job.collectionWindowId) return;
+    const tab = await chrome.tabs.get(window.tabId).catch(() => null);
+    if (tab?.windowId === window.windowId) await chrome.tabs.remove(window.tabId);
+    if (window.layout) {
+      const { windowId, original, arranged } = window.layout;
+      const current = await chrome.windows.get(windowId).catch(() => null);
+      // Restore only our own arrangement; preserve subsequent user resizing.
+      if (current?.state === 'normal' && Object.keys(arranged).every(key => current[key] === arranged[key])) {
+        await chrome.windows.update(windowId, original.state === 'maximized'
+          ? { state: 'maximized' } : { ...original, state: 'normal' });
+      }
+    }
+    delete windows[job.jobId];
+    await saveWindows(windows);
+  }
 
   async function updateBadge(jobs) {
     jobs ||= await read();
@@ -39,11 +76,80 @@ const ExportJobs = (() => {
     for (const [id, job] of Object.entries(jobs)) if (!active(job) && !keep.has(id)) delete jobs[id];
     await chrome.storage.local.set({ [KEY]: jobs });
     await updateBadge(jobs);
-    if (changed) chrome.runtime.sendMessage({ action: 'exportJobUpdate', job: changed }).catch(() => {});
+    if (changed) {
+      chrome.runtime.sendMessage({ action: 'exportJobUpdate', job: changed }).catch(() => {});
+      if (Number.isInteger(changed.sourceTabId)) {
+        chrome.tabs.sendMessage(changed.sourceTabId, { action: 'exportJobUpdate', job: changed },
+          { frameId: changed.sourceFrameId }).catch(() => {});
+      }
+      if (changed.collectionWindowId !== undefined && (!active(changed) || ['packaging', 'download'].includes(changed.phase))) {
+        await closeCollection(changed).catch(error => console.warn('[GCE] Could not close export window:', error));
+      }
+    }
   }
 
   function revise(job, update) {
     return { ...job, ...update, updatedAt: Date.now(), revision: (job.revision || 0) + 1 };
+  }
+
+  function createCollection(jobId, details, placement = null) {
+    owned.add(jobId);
+    return serial(async () => {
+      const jobs = await read();
+      if (jobs[jobId]) throw new Error('This export request was already started.');
+      if (Object.values(jobs).some(job => active(job) && job.collectionWindowId !== undefined &&
+        Number.isInteger(details.sourceWindowId) && job.sourceWindowId === details.sourceWindowId)) {
+        throw new Error('An export is already running in this window. Finish or cancel it first.');
+      }
+      const windows = await readWindows();
+      windows[jobId] = { tabId: details.tabId, windowId: details.collectionWindowId, ...placement };
+      await saveWindows(windows);
+      jobs[jobId] = revise({ jobId, ...details, frameId: 0, startedAt: Date.now() }, {
+        state: 'working', phase: 'opening', text: 'Opening export window…', percent: 1
+      });
+      await save(jobs, jobs[jobId]);
+    });
+  }
+
+  function arrangeCollection(jobId) {
+    return serial(async () => {
+      const windows = await readWindows();
+      const window = windows[jobId];
+      if (!window) throw new Error('Export cancelled.');
+      if (window.layout) {
+        const actual = await chrome.windows.update(window.layout.windowId, { ...window.layout.arranged, state: 'normal' });
+        const { left, top, width, height } = actual;
+        window.layout.arranged = { left, top, width, height };
+        await saveWindows(windows);
+      }
+      if (window.helper) await chrome.windows.update(window.windowId, { ...window.helper, focused: false });
+    });
+  }
+
+  function prepareCollection(jobId, frameId) {
+    return serial(async () => {
+      const jobs = await read();
+      const job = jobs[jobId];
+      if (!active(job || {}) || job.phase !== 'opening') throw new Error('Export cancelled.');
+      jobs[jobId] = revise(job, { frameId });
+      await save(jobs, jobs[jobId]);
+    });
+  }
+
+  async function collectionPending(jobId) {
+    const job = (await read())[jobId];
+    return active(job || {}) && job.phase === 'opening';
+  }
+
+  function failCollection(jobId, error) {
+    owned.delete(jobId);
+    return serial(async () => {
+      const jobs = await read();
+      const job = jobs[jobId];
+      if (!active(job || {})) return;
+      jobs[jobId] = revise(job, { state: 'error', phase: 'failed', text: `Export failed: ${error}`, percent: 0 });
+      await save(jobs, jobs[jobId]);
+    });
   }
 
   function progress(msg, sender) {
@@ -118,11 +224,11 @@ const ExportJobs = (() => {
     });
   }
 
-  function interruptTab(tabId) {
+  function interruptTab(tabId, loading = false) {
     return serial(async () => {
       const jobs = await read();
       for (const job of Object.values(jobs)) {
-        if (job.tabId !== tabId || !needsPage(job)) continue;
+        if (job.tabId !== tabId || !needsPage(job) || (loading && job.phase === 'opening')) continue;
         jobs[job.jobId] = revise(job, { state: 'error', phase: 'interrupted',
           text: 'Export interrupted: the Chat tab was closed, reloaded, or discarded. Please retry.' });
         await save(jobs, jobs[job.jobId]);
@@ -152,11 +258,15 @@ const ExportJobs = (() => {
         if (!active(job) || owned.has(job.jobId)) continue;
         try {
           const tab = await chrome.tabs.get(job.tabId);
-          if (!tab || tab.discarded || job.phase === 'packaging') throw new Error('Context lost');
-          const reply = await messagePage(job, { action: 'getExportJob' });
+          if (!tab || tab.discarded || ['opening', 'packaging'].includes(job.phase)) throw new Error('Context lost');
+          const reply = await messagePage(job, { action: 'getExportJob', jobId: job.jobId });
           if (reply?.suspended) {
-            job = revise(job, { state: 'paused', text: 'Waiting for Chat. Return to its tab to resume.' });
+            job = revise(job, { state: 'paused', text: job.collectionWindowId === undefined
+              ? 'Waiting for Chat. Return to its tab to resume.' : 'Waiting for the export window. Choose Show export to resume.' });
           } else if (reply?.jobId !== job.jobId) throw new Error('Context lost');
+          else if (['done', 'error'].includes(reply.state)) {
+            job = revise(job, { state: reply.state, phase: reply.phase, text: reply.text, percent: reply.percent });
+          }
           else if (['working', 'paused'].includes(reply.state) && reply.state !== job.state) {
             job = revise(job, { state: reply.state, text: reply.text || job.text, percent: reply.percent ?? job.percent });
           } else continue;
@@ -185,9 +295,17 @@ const ExportJobs = (() => {
         await save(jobs, jobs[job.jobId]);
       } else if (msg.action === 'focusExportJob') {
         const tab = await chrome.tabs.update(job.tabId, { active: true });
-        if (tab.windowId !== undefined) await chrome.windows?.update(tab.windowId, { focused: true });
+        const update = { focused: true };
+        if (job.collectionWindowId !== undefined) update.state = 'normal';
+        if (tab.windowId !== undefined) await chrome.windows?.update(tab.windowId, update);
       } else {
         if (!needsPage(job)) return { success: false, error: 'This export has already been handed off for saving.' };
+        if (job.phase === 'opening') {
+          owned.delete(job.jobId);
+          jobs[job.jobId] = revise(job, { state: 'error', phase: 'cancelled', text: 'Export cancelled.', percent: 0 });
+          await save(jobs, jobs[job.jobId]);
+          return { success: true };
+        }
         const reply = await messagePage(job, { action: 'cancelExportJob', jobId: job.jobId });
         return { success: reply?.success === true };
       }
@@ -204,8 +322,11 @@ const ExportJobs = (() => {
   });
   chrome.tabs.onRemoved?.addListener(tabId => interruptTab(tabId).catch(console.error));
   chrome.tabs.onUpdated?.addListener((tabId, change) => {
-    if (change.status === 'loading' || change.discarded) interruptTab(tabId).catch(console.error);
+    if (change.status === 'loading' || change.discarded) interruptTab(tabId, !change.discarded).catch(console.error);
   });
 
-  return { handleMessage, beginPackaging, downloaded, failed, recover, updateBadge };
+  return { handleMessage, beginPackaging, downloaded, failed, recover, updateBadge,
+    createCollection, arrangeCollection, prepareCollection, collectionPending, failCollection, isCollectionTab,
+    async getJob(jobId) { return (await read())[jobId]; },
+    collectionStarted(jobId) { owned.delete(jobId); } };
 })();

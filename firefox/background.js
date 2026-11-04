@@ -12,8 +12,9 @@ if (typeof importScripts === 'function' && typeof ExportJobs === 'undefined') {
 const mediaRequests = new Map();
 const CHAT_URL_PATTERNS = ['https://chat.google.com/*', 'https://mail.google.com/*',
   'https://chat.google.com.mcas.ms/*', 'https://mail.google.com.mcas.ms/*'];
-const CONTENT_PROTOCOL = 1; // Shared by content health and popup startup replies.
+const CONTENT_PROTOCOL = 2; // Shared by content health and popup startup replies.
 const contentPreparations = new Map();
+const collectionStarts = new Map();
 // Persist pending download/checkpoint associations so worker suspension is safe.
 let checkpointQueue = Promise.resolve();
 function serializeCheckpoint(work) {
@@ -161,16 +162,17 @@ async function updateExportMode(update) {
   return next;
 }
 
-function handleExportModeMessage(msg) {
+function handleExportModeMessage(msg, sender) {
   switch (msg.action) {
     case 'getExportMode':
-      return getExportMode().then(state => ({ enabled: state.enabled, idleMs: EXPORT_MODE_IDLE_MS }));
+      return (async () => ({ enabled: !(await ExportJobs.isCollectionTab(sender.tab?.id)) && (await getExportMode()).enabled, idleMs: EXPORT_MODE_IDLE_MS }))();
     case 'setExportMode':
       return setExportMode(msg.enabled === true).then(state => ({ enabled: state.enabled }));
     case 'exportModeActivity':
       return updateExportMode(() => ({})).then(state => ({ enabled: state.enabled }));
     case 'autoExportCandidate':
       return serializeExportMode(async () => {
+        if (await ExportJobs.isCollectionTab(sender.tab?.id)) return { run: false };
         const state = await getExportMode();
         if (!state.enabled) return { run: false };
         const settings = await getSettings();
@@ -206,7 +208,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     jobReply.then(sendResponse, err => sendResponse({ success: false, error: err.message }));
     return true;
   }
-  const exportModeReply = handleExportModeMessage(msg);
+  const exportModeReply = handleExportModeMessage(msg, sender);
   if (exportModeReply) {
     exportModeReply.then(sendResponse, err => sendResponse({ success: false, error: err.message }));
     return true;
@@ -251,7 +253,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         chrome.storage.local.get('gceExportJobs').catch(() => {});
       }, 20000) : null;
       try {
-        await ExportJobs.beginPackaging(msg.jobId, sender);
         if (msg.payload.sourceUrl && sender.tab?.id) {
           // The payload is already captured; closing its tab cannot cancel packaging.
           const tab = await chrome.tabs.get(sender.tab.id).catch(() => null);
@@ -259,6 +260,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             throw new Error('Conversation changed during export. Please retry.');
           }
         }
+        await ExportJobs.beginPackaging(msg.jobId, sender);
         const result = msg.format === 'html'
           ? await packageHtml(msg.payload)
           : msg.format === 'md'
@@ -337,22 +339,122 @@ async function triggerExport(contextMenuTab, format, overrides = {}, requestedJo
   // Send export command
   const settings = { ...await getSettings(), ...overrides };
   settings.sourceUrl = (await chrome.tabs.get(targetTabId)).url;
+  const jobId = /^job-[a-zA-Z0-9-]{1,96}$/.test(requestedJobId) ? requestedJobId : `job-${crypto.randomUUID()}`;
+  if ((settings.loadAll !== false || settings.incremental) && typeof chrome.windows?.create === 'function') {
+    if (collectionStarts.has(jobId)) return collectionStarts.get(jobId);
+    const pending = startCollectionWindow(targetTabId, frame, format, settings, jobId);
+    collectionStarts.set(jobId, pending);
+    try { return await pending; }
+    finally { collectionStarts.delete(jobId); }
+  }
+  return sendExportCommand(targetTabId, frame.frameId, format, settings, jobId);
+}
+
+async function startCollectionWindow(sourceTabId, sourceFrame, format, settings, jobId) {
+  const existing = await ExportJobs.getJob(jobId);
+  if (existing) {
+    if (existing.sourceTabId === sourceTabId && ['working', 'paused'].includes(existing.state)) return { received: true, jobId };
+    throw new Error('This export request was already used. Start a new export.');
+  }
+  const href = sourceFrame.conversationUrl || settings.sourceUrl;
+  if (!/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/.test(href || '')) throw new Error('Open this conversation in a browser tab and retry.');
+  const url = conversationWindowUrl(href);
+  const source = await chrome.tabs.get(sourceTabId);
+  const sourceWindow = sourceFrame.display && chrome.windows.get ? await chrome.windows.get(source.windowId) : null;
+  const placement = sourceWindow ? collectionWindowLayout(sourceWindow, sourceFrame.display) : null;
+  // Register the blank helper before loading Chat so automatic export cannot
+  // start recursively in the new window, even on a fast cached load.
+  const options = { url: 'about:blank', type: 'popup', focused: false,
+    width: 720, height: 760, ...placement?.helper, incognito: !!source.incognito };
+  if (source.cookieStoreId) options.cookieStoreId = source.cookieStoreId;
+  const window = await chrome.windows.create(options);
+  const tabId = window.tabs?.[0]?.id;
+  if (!Number.isInteger(tabId)) throw new Error('Could not create the export window.');
+  try {
+    await ExportJobs.createCollection(jobId, { tabId, collectionWindowId: window.id,
+      sourceTabId, sourceFrameId: sourceFrame.frameId, sourceWindowId: source.windowId,
+      conversationName: sourceFrame.name || 'Google Chat' }, placement);
+    await ExportJobs.arrangeCollection(jobId);
+    await chrome.tabs.update(tabId, { url, autoDiscardable: false });
+    const deadline = Date.now() + 30000;
+    let frame;
+    while (Date.now() < deadline) {
+      if (!await ExportJobs.collectionPending(jobId)) throw new Error('Export cancelled.');
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === 'complete') {
+        try { frame = await ensureContentScript(tabId); } catch { /* Chat can finish rendering after navigation. */ }
+        if (frame?.name) {
+          if (frame.name !== sourceFrame.name || (sourceFrame.conversationScope && frame.conversationScope !== sourceFrame.conversationScope)) {
+            throw new Error('The export window opened a different conversation. Open the conversation in a browser tab and retry.');
+          }
+          break;
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (!frame?.name) throw new Error('Chat did not load in the export window. Check your sign-in and retry.');
+    if (placement) await chrome.windows.update(window.id, { ...placement.helper, focused: false });
+    if (sourceWindow?.focused && (await chrome.windows.get(window.id)).focused) {
+      await chrome.windows.update(source.windowId, { focused: true });
+    }
+    await ExportJobs.prepareCollection(jobId, frame.frameId);
+    const response = await sendExportCommand(tabId, frame.frameId, format,
+      { ...settings, sourceUrl: url, collectionWindow: true }, jobId);
+    ExportJobs.collectionStarted(jobId);
+    return response;
+  } catch (error) {
+    await ExportJobs.failCollection(jobId, error.message);
+    // Also cover a storage failure before the helper could be registered.
+    if (!await ExportJobs.getJob(jobId)) await chrome.tabs.remove(tabId).catch(() => {});
+    throw error;
+  }
+}
+
+function collectionWindowLayout(window, display) {
+  if (![window.left, window.top, window.width, window.height, display.width, display.height].every(Number.isFinite) || display.width < 1000) return null;
+  if (window.state === 'fullscreen') throw new Error('Exit full screen and retry so the export window can stay visible.');
+  const width = 500;
+  const helper = { width, height: Math.min(window.height, display.height),
+    top: Math.max(display.top, Math.min(window.top, display.top + display.height - Math.min(window.height, display.height))) };
+  if (display.left + display.width - window.left - window.width >= width) helper.left = window.left + window.width;
+  else if (window.left - display.left >= width) helper.left = window.left - width;
+  else {
+    const arranged = { left: display.left, top: helper.top,
+      width: Math.min(window.width, display.width - width), height: helper.height };
+    helper.left = arranged.left + arranged.width;
+    const { id: windowId, left, top, width: originalWidth, height, state } = window;
+    return { helper, layout: { windowId, original: { left, top, width: originalWidth, height, state }, arranged } };
+  }
+  return { helper };
+}
+
+function conversationWindowUrl(href) {
+  const url = new URL(href);
+  // A deep link can open only the selected thread on a narrow Chat window.
+  // Keep the account and proxy parameters, but start at the conversation root.
+  url.pathname = url.pathname.replace(/((?:\/app\/|\/)(?:dm|space|room|chat)\/[A-Za-z0-9_-]+)\/.*$/, '$1');
+  url.hash = url.hash.replace(/^(#chat\/(?:dm|space|room|chat)\/[A-Za-z0-9_-]+)\/.*$/, '$1');
+  return url.href;
+}
+
+async function sendExportCommand(targetTabId, frameId, format, settings, jobId) {
   const command = {
     action: 'startExport',
-    jobId: /^job-[a-zA-Z0-9-]{1,96}$/.test(requestedJobId) ? requestedJobId : `job-${crypto.randomUUID()}`,
+    jobId,
     format,
     loadAll: settings.loadAll !== false,  // default true
     includeMedia: settings.includeMedia !== false,  // default true for html
     dateFrom: settings.dateFrom || '',
     incremental: settings.incremental === true,
-    sourceUrl: settings.sourceUrl
+    sourceUrl: settings.sourceUrl,
+    collectionWindow: settings.collectionWindow === true
   };
   let response;
   try {
-    response = await chrome.tabs.sendMessage(targetTabId, command, { frameId: frame.frameId });
+    response = await chrome.tabs.sendMessage(targetTabId, command, { frameId });
   } catch {
     const results = await chrome.scripting.executeScript({
-      target: { tabId: targetTabId, frameIds: [frame.frameId] },
+      target: { tabId: targetTabId, frameIds: [frameId] },
       func: injectableExportTrigger,
       args: [command]
     });

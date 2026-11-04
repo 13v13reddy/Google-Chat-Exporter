@@ -64,9 +64,9 @@ function loadContent(target = 'chrome', { includeTheme = true } = {}) {
 function installProgressDom(context) {
   const hosts = [];
   class Element {
-    constructor() { this.style = {}; this.children = []; this.attributes = {}; this.slots = new Map(); this.isConnected = false; }
+    constructor() { this.style = {}; this.children = []; this.attributes = {}; this.slots = new Map(); this.handlers = new Map(); this.isConnected = false; }
     appendChild(element) { this.children.push(element); return element; }
-    addEventListener() {}
+    addEventListener(type, fn) { this.handlers.set(type, fn); }
     getAttribute(name) { return this.attributes[name] ?? null; }
     querySelector(selector) {
       if (!this.slots.has(selector)) this.slots.set(selector, new Element());
@@ -81,6 +81,111 @@ function installProgressDom(context) {
 }
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: a terminal outcome remains available only for its requested job ID`, async () => {
+    const c = loadContent(target);
+    installProgressDom(c);
+    c.isInChatFrame = () => true;
+    c.getConversationName = () => 'Fixture';
+    c.extractMessages = () => [];
+    c.sleep = async () => {};
+    assert.equal(await c.runExport({ jobId: 'job-ended', loadAll: false }), 'empty');
+    const read = message => new Promise(resolve => c.chrome.runtime.onMessage.listener(message, {}, resolve));
+    assert.equal((await read({ action: 'getExportJob' })).jobId, null);
+    const result = await read({ action: 'getExportJob', jobId: 'job-ended' });
+    assert.equal(result.jobId, 'job-ended');
+    assert.equal(result.phase, 'empty');
+    assert.equal(result.state, 'error');
+    assert.equal((await read({ action: 'getExportJob', jobId: 'job-other' })).jobId, null);
+  });
+
+  test(`${target}: stopped paints pause collection even when the document reports visible`, async () => {
+    const c = loadContent(target);
+    const frames = new Map(), timers = new Map(), statuses = [];
+    let id = 0;
+    c.document.hidden = false;
+    c.requestAnimationFrame = fn => { const key = ++id; frames.set(key, fn); return key; };
+    c.cancelAnimationFrame = key => frames.delete(key);
+    c.setTimeout = fn => { const key = ++id; timers.set(key, fn); return key; };
+    c.clearTimeout = key => timers.delete(key);
+    c.showProgress = (_text, _percent, state) => statuses.push(state);
+    vm.runInContext("exportJobId = 'job-paint'; exportInWindow = true", c);
+    let settled = false;
+    const waiting = c.waitForDocumentPaint().then(value => { settled = true; return value; });
+    await new Promise(resolve => setImmediate(resolve));
+    for (const fn of [...timers.values()]) fn();
+    assert.equal(settled, false, 'a timer cannot certify a rendered page');
+    assert.equal(statuses.at(-1), 'paused');
+    const paint = () => { const [key, fn] = frames.entries().next().value; frames.delete(key); fn(); };
+    paint(); paint();
+    assert.equal(await waiting, true);
+    assert.equal(statuses.at(-1), 'working');
+    assert.equal(timers.size, 0);
+    const controller = new AbortController();
+    const cancelled = c.waitForDocumentPaint(controller.signal);
+    await new Promise(resolve => setImmediate(resolve));
+    controller.abort();
+    await assert.rejects(cancelled, { name: 'AbortError' });
+    assert.equal(frames.size, 0);
+    assert.equal(timers.size, 0);
+  });
+
+  test(`${target}: narrow Chat windows reveal the main timeline before loading more history`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const f = installThreadFixture(c, { narrow: true });
+    c.waitForHistoryMutation = async container => {
+      assert.ok(container.clientHeight > 0, 'history cannot be verified through a thread-hidden timeline');
+      return false;
+    };
+    const history = await c.scrollToLoadAll();
+    assert.equal(history.messages.length, 5);
+    assert.equal(history.threadsComplete, true);
+    assert.equal(history.reason, 'idle');
+    assert.equal(f.state.active, '');
+  });
+
+  test(`${target}: revealing a narrow timeline still restores the previously open thread`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const f = installThreadFixture(c, { narrow: true, previousThread: true });
+    const collector = c.createThreadCollector(f.main, null, null);
+    await collector.collect();
+    assert.equal(f.state.active, '', 'history traversal can use the main timeline');
+    await collector.restore();
+    assert.equal(f.state.active, 'old-parent');
+    assert.equal(f.panel.scrollTop, 100);
+  });
+
+  test(`${target}: a collection window reports progress, cancellation, and its saved file in the original Chat`, async () => {
+    const c = loadContent(target);
+    const hosts = installProgressDom(c);
+    const sent = [];
+    c.chrome.runtime.sendMessage = async message => { sent.push(message); return {}; };
+    let result, dismiss;
+    c.mountExportResult = (_host, value, onClose) => { result = value; dismiss = onClose; };
+    const send = job => c.chrome.runtime.onMessage.listener({ action: 'exportJobUpdate', job }, {}, () => {});
+    const job = { jobId: 'job-window', collectionWindowId: 9, startedAt: 1, revision: 1,
+      state: 'working', phase: 'history', text: 'Loading history', percent: 15 };
+    send(job);
+    const progress = hosts.at(-1);
+    assert.equal(progress.querySelector('.gce-label').textContent, 'Loading history');
+    assert.equal(progress.querySelector('.gce-close').getAttribute('aria-label'), 'Cancel export');
+    progress.querySelector('.gce-close').handlers.get('click')();
+    assert.equal(sent.at(-1).action, 'cancelExportJob');
+    assert.equal(sent.at(-1).jobId, job.jobId);
+    send({ ...job, revision: 2, phase: 'packaging', text: 'Packaging export' });
+    assert.equal(progress.querySelector('.gce-close').hidden, true, 'collection cannot be cancelled after handoff');
+    send(job);
+    assert.equal(progress.querySelector('.gce-label').textContent, 'Packaging export', 'stale progress cannot overwrite handoff');
+    send({ ...job, revision: 3, phase: 'complete', state: 'done', downloadId: 42, filename: 'Fixture.md' });
+    assert.equal(result.downloadId, 42);
+    dismiss();
+    assert.equal(sent.at(-1).action, 'acknowledgeExportJob');
+    assert.equal(sent.at(-1).jobId, job.jobId);
+    assert.ok(!sent.some(message => message.action === 'exportStateUpdate'), 'mirrored status must not feed back as a new export');
+    assert.equal(hosts.at(-1).isConnected, false);
+  });
+
   test(`${target}: content ping reports missing helpers to the background`, () => {
     const c = loadContent(target, { includeTheme: false });
     c.mountExportResult = () => {};

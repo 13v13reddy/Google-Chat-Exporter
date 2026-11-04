@@ -65,12 +65,208 @@ function loadBackground(target = 'chrome', withZip = false, initialStorage = {})
 }
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: status recovery keeps a completed cancellation when its progress message is late`, async () => {
+    const c = loadBackground(target);
+    const ask = (message, sender = {}) => new Promise(resolve => c.chrome.runtime.onMessage.listener(message, sender, resolve));
+    await ask({ action: 'exportStateUpdate', jobId: 'job-cancel-race', state: 'paused', phase: 'history', text: 'Paused', percent: 15 }, { tab: { id: 7 }, frameId: 2 });
+    c.chrome.tabs.sendMessage = async (_id, message) => {
+      assert.equal(message.jobId, 'job-cancel-race');
+      return { jobId: 'job-cancel-race', state: 'error', phase: 'cancelled', text: 'Export cancelled.', percent: 0 };
+    };
+    const job = (await ask({ action: 'getExportJobs' })).jobs[0];
+    assert.equal(job.phase, 'cancelled');
+    assert.equal(job.text, 'Export cancelled.');
+    assert.equal(job.state, 'error');
+  });
+
+  test(`${target}: full history uses its own window and hands saving off before closing it`, async () => {
+    const c = loadBackground(target);
+    const rootUrl = 'https://chat.google.com.mcas.ms/u/1/room/ROOM?authuser=1';
+    const url = rootUrl.replace('?', '/TOPIC/MESSAGE?');
+    const tabs = new Map([[7, { id: 7, windowId: 3, url, status: 'complete', ...(target === 'firefox' ? { cookieStoreId: 'firefox-container-1' } : {}) }]]);
+    const created = [], removed = [], starts = [], mirrored = [], focused = [];
+    c.chrome.windows = { async create(options) {
+      created.push(options);
+      const tab = { id: 27, windowId: 9, url: options.url, status: 'complete' };
+      tabs.set(tab.id, tab);
+      return { id: 9, tabs: [tab] };
+    }, async update(id, options) { focused.push({ id, options }); } };
+    c.chrome.tabs.get = async id => { if (!tabs.has(id)) throw new Error('Tab closed'); return tabs.get(id); };
+    c.chrome.tabs.update = async (id, update) => { Object.assign(tabs.get(id), update); return tabs.get(id); };
+    c.chrome.tabs.remove = async id => { removed.push(id); tabs.delete(id); c.chrome.tabs.onRemoved.listener(id); };
+    c.ensureContentScript = async id => ({ frameId: id === 7 ? 2 : 4, name: 'Fixture room', conversationUrl: url, conversationScope: 'fixture-room' });
+    const ask = (msg, sender = {}) => new Promise(resolve => c.chrome.runtime.onMessage.listener(msg, sender, resolve));
+    const owner = { tab: { id: 27 }, frameId: 4 };
+    c.chrome.tabs.sendMessage = async (id, msg, options) => {
+      if (msg.action === 'exportJobUpdate') { mirrored.push({ id, msg, options }); return {}; }
+      if (msg.action === 'startExport') {
+        starts.push({ id, msg, options });
+        await ask({ action: 'exportStateUpdate', jobId: msg.jobId, phase: 'history', state: 'working', text: 'Loading history', percent: 15 }, owner);
+        return { received: true, jobId: msg.jobId };
+      }
+      return { jobId: 'job-window', phase: 'history', state: 'working' };
+    };
+    const response = await c.triggerExport({ id: 7, url }, 'md', {}, 'job-window');
+    assert.equal(response.jobId, 'job-window');
+    assert.equal(created.length, 1);
+    assert.equal(created[0].type, 'popup');
+    assert.equal(created[0].focused, false, 'starting an export must not take focus');
+    if (target === 'firefox') assert.equal(created[0].cookieStoreId, 'firefox-container-1');
+    assert.deepEqual(starts.map(start => start.id), [27], 'collection never scrolls the source tab');
+    assert.equal(starts[0].options.frameId, 4);
+    assert.equal(starts[0].msg.collectionWindow, true);
+    assert.equal(tabs.get(27).url, rootUrl, 'the account and MCAS host are preserved while the thread deep link is removed');
+    assert.equal(tabs.get(27).autoDiscardable, false);
+    await c.triggerExport({ id: 7, url }, 'md', {}, 'job-window');
+    assert.equal(created.length, 1, 'a repeated request cannot create a second helper');
+    await ask({ action: 'focusExportJob', jobId: 'job-window' });
+    assert.equal(focused[0].id, 9);
+    assert.equal(focused[0].options.state, 'normal', 'Show export also restores a minimized collection window');
+    await ask({ action: 'setExportMode', enabled: true });
+    assert.equal((await ask({ action: 'autoExportCandidate', key: 'room' }, owner)).run, false, 'the helper cannot recursively auto-export');
+    c.chrome.tabs.onUpdated.listener(7, { status: 'loading' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await ask({ action: 'getExportJobs' })).jobs.find(job => job.jobId === 'job-window').state, 'working');
+    c.owner = owner;
+    await vm.runInContext('ExportJobs.beginPackaging("job-window", owner)', c);
+    assert.deepEqual(removed, [27], 'only the task-owned collection tab closes');
+    assert.ok(tabs.has(7));
+    assert.equal((await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs['job-window'].phase, 'packaging');
+    await vm.runInContext('ExportJobs.downloaded("job-window", owner, { downloadId: 42, filename: "Fixture.md" })', c);
+    assert.equal(mirrored.at(-1).msg.job.state, 'done');
+    assert.equal(mirrored.at(-1).id, 7);
+    assert.equal(mirrored.at(-1).options.frameId, 2);
+  });
+
+  test(`${target}: collection URLs open the conversation root across standalone and Gmail layouts`, () => {
+    const c = loadBackground(target);
+    for (const [href, expected] of [
+      ['https://chat.google.com/app/chat/ROOM/TOPIC/MESSAGE?cls=7', 'https://chat.google.com/app/chat/ROOM?cls=7'],
+      ['https://chat.google.com/u/2/room/ROOM/thread/TOPIC', 'https://chat.google.com/u/2/room/ROOM'],
+      ['https://mail.google.com.mcas.ms/mail/u/1/#chat/space/ROOM/TOPIC/MESSAGE', 'https://mail.google.com.mcas.ms/mail/u/1/#chat/space/ROOM'],
+      ['https://chat.google.com/app/dm/ROOM', 'https://chat.google.com/app/dm/ROOM']
+    ]) assert.equal(c.conversationWindowUrl(href), expected);
+  });
+
+  test(`${target}: collection placement keeps both windows visible and restores only its own layout`, async () => {
+    for (const resized of [false, true]) {
+      const c = loadBackground(target);
+      const source = { id: 3, left: 0, top: 33, width: 1512, height: 949, state: 'normal' };
+      const windows = new Map([[3, { ...source }], [9, { id: 9 }]]);
+      c.chrome.windows = {
+        async get(id) { return windows.get(id); },
+        async update(id, values) { return Object.assign(windows.get(id), values); }
+      };
+      c.chrome.tabs.get = async id => ({ id, windowId: 9 });
+      c.chrome.tabs.remove = async () => {};
+      c.placement = c.collectionWindowLayout(source, { left: 0, top: 33, width: 1512, height: 949 });
+      c.owner = { tab: { id: 27 }, frameId: 4 };
+      await vm.runInContext('ExportJobs.createCollection("job-layout", { tabId: 27, collectionWindowId: 9, sourceWindowId: 3 }, placement)', c);
+      await vm.runInContext('ExportJobs.arrangeCollection("job-layout")', c);
+      assert.equal(windows.get(3).width, 1012);
+      assert.equal(windows.get(9).left, 1012);
+      assert.equal(windows.get(9).width, 500);
+      if (resized) windows.get(3).width = 900;
+      await vm.runInContext('ExportJobs.prepareCollection("job-layout", 4)', c);
+      await vm.runInContext('ExportJobs.beginPackaging("job-layout", owner)', c);
+      assert.equal(windows.get(3).width, resized ? 900 : 1512);
+    }
+    const c = loadBackground(target);
+    const placement = c.collectionWindowLayout({ id: 3, left: 0, top: 33, width: 800, height: 700, state: 'normal' },
+      { left: 0, top: 33, width: 1512, height: 949 });
+    assert.equal(placement.layout, undefined, 'existing space does not require resizing the main browser');
+    assert.equal(placement.helper.left, 800);
+    assert.throws(() => c.collectionWindowLayout({ left: 0, top: 33, width: 1512, height: 949, state: 'fullscreen' },
+      { left: 0, top: 33, width: 1512, height: 949 }), /Exit full screen/);
+  });
+
+  test(`${target}: cancelling while the export window opens closes it and preserves cancellation`, async () => {
+    const c = loadBackground(target);
+    const url = 'https://chat.google.com/app/chat/ROOM';
+    const removed = [];
+    c.ensureContentScript = async () => ({ frameId: 2, name: 'Fixture room', conversationUrl: url });
+    c.chrome.windows = { async create() { return { id: 9, tabs: [{ id: 27 }] }; } };
+    c.chrome.tabs.update = async () => {};
+    c.chrome.tabs.get = async id => ({ id, windowId: id === 27 ? 9 : 3, url, status: 'loading' });
+    c.chrome.tabs.remove = async id => { removed.push(id); };
+    let release, waiting;
+    const opened = new Promise(resolve => { waiting = resolve; });
+    c.setTimeout = fn => { release = fn; waiting(); return 1; };
+    const result = c.triggerExport({ id: 7, url }, 'md', {}, 'job-opening');
+    const rejected = assert.rejects(result, /cancelled/);
+    await opened;
+    const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'cancelExportJob', jobId: 'job-opening' }, {}, resolve));
+    assert.equal(response.success, true);
+    release();
+    await rejected;
+    assert.deepEqual(removed, [27]);
+    const job = (await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs['job-opening'];
+    assert.equal(job.phase, 'cancelled');
+    assert.equal(job.state, 'error');
+  });
+
+  test(`${target}: an export window cannot capture a different conversation`, async () => {
+    const c = loadBackground(target);
+    const url = 'https://mail.google.com/mail/u/1/#chat/space/ROOM';
+    const removed = [];
+    c.chrome.windows = { async create() { return { id: 9, tabs: [{ id: 27 }] }; } };
+    c.chrome.tabs.update = async () => {};
+    c.chrome.tabs.get = async id => ({ id, windowId: id === 27 ? 9 : 3, url, status: 'complete' });
+    c.chrome.tabs.remove = async id => { removed.push(id); };
+    c.ensureContentScript = async id => ({ frameId: 2, name: id === 7 ? 'Selected room' : 'Another room', conversationUrl: url });
+    let starts = 0;
+    c.chrome.tabs.sendMessage = async (_id, message) => { if (message.action === 'startExport') starts++; };
+    await assert.rejects(c.triggerExport({ id: 7, url }, 'md', {}, 'job-mismatch'), /different conversation/);
+    assert.equal(starts, 0);
+    assert.deepEqual(removed, [27]);
+    assert.equal((await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs['job-mismatch'].phase, 'failed');
+  });
+
+  test(`${target}: retained helper IDs cannot close a new window after a browser restart`, async () => {
+    const job = { jobId: 'job-old-window', tabId: 27, frameId: 0, collectionWindowId: 9,
+      state: 'working', phase: 'history', startedAt: 1, revision: 1 };
+    const c = loadBackground(target, false, { gceExportJobs: { [job.jobId]: job } });
+    c.chrome.tabs.get = async id => ({ id, windowId: 9 });
+    let removed = 0;
+    c.chrome.tabs.remove = async () => { removed++; };
+    await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'getExportJobs' }, {}, resolve));
+    assert.equal(removed, 0);
+    assert.equal((await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs[job.jobId].phase, 'interrupted');
+  });
+
+  test(`${target}: worker restart retains collection ownership through packaging cleanup`, async () => {
+    const job = { jobId: 'job-resumed-window', tabId: 27, frameId: 4, collectionWindowId: 9,
+      state: 'working', phase: 'history', startedAt: 1, revision: 1 };
+    const c = loadBackground(target, false, { gceExportJobs: { [job.jobId]: job } });
+    await c.chrome.storage.session.set({ gceCollectionWindows: { [job.jobId]: { tabId: 27, windowId: 9 } } });
+    c.chrome.tabs.get = async id => ({ id, windowId: 9 });
+    c.chrome.tabs.sendMessage = async () => ({ jobId: job.jobId, state: 'working' });
+    let removed;
+    c.chrome.tabs.remove = async id => { removed = id; };
+    const recovered = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'getExportJobs' }, {}, resolve));
+    assert.equal(recovered.jobs[0].state, 'working');
+    c.owner = { tab: { id: 27 }, frameId: 4 };
+    await vm.runInContext('ExportJobs.beginPackaging("job-resumed-window", owner)', c);
+    assert.equal(removed, 27);
+    assert.equal(Object.keys((await c.chrome.storage.session.get('gceCollectionWindows')).gceCollectionWindows).length, 0);
+    assert.equal((await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs[job.jobId].phase, 'packaging');
+  });
+
+  test(`${target}: browsers without separate windows retain in-tab full-history exports`, async () => {
+    const c = loadBackground(target);
+    const fixture = installFrames(c, target, [{ id: 0, chat: true }]);
+    await c.triggerExport({ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }, 'md');
+    assert.equal(fixture.starts.length, 1);
+    assert.equal(fixture.starts[0].options.loadAll, true);
+    assert.equal(fixture.starts[0].options.collectionWindow, false);
+  });
+
   test(`${target}: conversation detection returns the Chat iframe’s name without starting an export`, async () => {
     const c = loadBackground(target);
     const fixture = installFrames(c, target, [{ id: 0, mail: true }, { id: 3, chat: true }]);
     const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'getConversation', tabId: 7 }, {}, resolve));
     assert.equal(response.success, true);
-    assert.equal(response.protocol, 1);
+    assert.equal(response.protocol, 2);
     assert.equal(response.name, 'Fixture room');
     assert.equal(fixture.starts.length, 0);
   });
@@ -78,7 +274,7 @@ for (const target of ['chrome', 'firefox']) {
   test(`${target}: toolbar export starts only in the Chat iframe and repairs only its missing helper`, async () => {
     const c = loadBackground(target);
     const fixture = installFrames(c, target, [{ id: 0, mail: true }, { id: 3, chat: true, theme: false }]);
-    await c.triggerExport({ id: 7, url: 'https://mail.google.com/mail/u/0/' }, 'md');
+    await c.triggerExport({ id: 7, url: 'https://mail.google.com/mail/u/0/' }, 'md', { loadAll: false });
     assert.deepEqual(fixture.starts.map(start => start.frameId), [3]);
     assert.deepEqual(fixture.injections, [{ frameIds: [3], files: ['theme.js'] }]);
     assert.equal(fixture.messages.find(message => message.action === 'startExport').options.frameId, 3);
@@ -87,9 +283,9 @@ for (const target of ['chrome', 'firefox']) {
   test(`${target}: startup replies identify the worker protocol and the exact accepted job`, async () => {
     const c = loadBackground(target);
     installFrames(c, target, [{ id: 0, chat: true }]);
-    const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'popupExport', tabId: 7, format: 'md', jobId: 'job-protocol' }, {}, resolve));
+    const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'popupExport', tabId: 7, format: 'md', settings: { loadAll: false }, jobId: 'job-protocol' }, {}, resolve));
     assert.equal(response.success, true);
-    assert.equal(response.protocol, 1);
+    assert.equal(response.protocol, 2);
     assert.equal(response.jobId, 'job-protocol');
   });
 
@@ -105,7 +301,7 @@ for (const target of ['chrome', 'firefox']) {
     const c = loadBackground(target);
     const fixture = installFrames(c, target, [{ id: 0, chat: true }]);
     fixture.rejectStart = true;
-    await assert.rejects(c.triggerExport({ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }, 'md'), /already running/i);
+    await assert.rejects(c.triggerExport({ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }, 'md', { loadAll: false }), /already running/i);
     assert.equal(fixture.starts.length, 0);
   });
 
@@ -113,7 +309,7 @@ for (const target of ['chrome', 'firefox']) {
     const c = loadBackground(target);
     const fixture = installFrames(c, target, [{ id: 0, mail: true }, { id: 2, chat: true }]);
     fixture.failMessages = true;
-    await c.triggerExport({ id: 7, url: 'https://mail.google.com/mail/u/0/' }, 'txt');
+    await c.triggerExport({ id: 7, url: 'https://mail.google.com/mail/u/0/' }, 'txt', { loadAll: false });
     assert.deepEqual(fixture.starts.map(start => start.frameId), [2]);
   });
 

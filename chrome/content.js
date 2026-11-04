@@ -88,8 +88,12 @@ function isInChatFrame() {
 function getExportHealth() {
   const inChatFrame = isInChatFrame();
   return {
-    protocol: 1, alive: true, inChatFrame,
+    protocol: 2, alive: true, inChatFrame,
     name: inChatFrame ? getConversationName() : '',
+    conversationUrl: inChatFrame ? conversationHrefFromPage() : '',
+    conversationScope: inChatFrame ? checkpointScopeFromPage('txt', false) : '',
+    display: typeof screen === 'object' ? { left: screen.availLeft || 0, top: screen.availTop || 0,
+      width: screen.availWidth, height: screen.availHeight } : null,
     themeReady: typeof GCETheme !== 'undefined' && typeof GCETheme.bind === 'function',
     resultHostReady: typeof mountExportResult === 'function'
   };
@@ -108,7 +112,10 @@ let progressJobId = null;
 let exportJobId = null;
 let exportPhase = 'idle';
 let exportName = '';
+let exportInWindow = false;
+let mirroredExportJob = null;
 let lastExportProgress = { text: '', percent: 0, state: 'working' };
+let lastExportReport = null;
 
 function bindProgressTheme(element) {
   if (typeof GCETheme === 'undefined' || typeof GCETheme.bind !== 'function') {
@@ -120,6 +127,7 @@ function bindProgressTheme(element) {
 
 function showProgress(text, percent, state = 'working') {
   lastExportProgress = { text, percent, state };
+  if (exportJobId) lastExportReport = { jobId: exportJobId, phase: exportPhase, ...lastExportProgress };
   progressJobId = exportJobId;
   try {
     renderProgress(text, percent, state);
@@ -189,6 +197,8 @@ function renderProgress(text, percent, state) {
       if (exportInProgress && exportController) {
         showProgress('Cancelling export...', 0);
         exportController.abort();
+      } else if (mirroredExportJob && ['working', 'paused'].includes(mirroredExportJob.state) && !['packaging', 'download'].includes(mirroredExportJob.phase)) {
+        chrome.runtime.sendMessage({ action: 'cancelExportJob', jobId: mirroredExportJob.jobId }).catch(() => {});
       } else {
         if (progressJobId && !exportInProgress) {
           chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId: progressJobId }).catch(() => {});
@@ -215,7 +225,10 @@ function renderProgress(text, percent, state) {
     bar.className = 'gce-bar' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
   }
   if (closeButton) {
-    const closeLabel = exportInProgress && exportController ? 'Cancel export' : 'Dismiss export notification';
+    const canCancel = (exportInProgress && exportController) ||
+      (mirroredExportJob && ['working', 'paused'].includes(mirroredExportJob.state) && !['packaging', 'download'].includes(mirroredExportJob.phase));
+    const closeLabel = canCancel ? 'Cancel export' : 'Dismiss export notification';
+    closeButton.hidden = mirroredExportJob?.phase === 'packaging' && mirroredExportJob.state === 'working';
     closeButton.title = closeLabel;
     closeButton.setAttribute('aria-label', closeLabel);
   }
@@ -242,10 +255,10 @@ function scheduleHideProgress(delay) {
   progressHideTimer = setTimeout(hideProgress, delay);
 }
 
-function showExportResult(result, warning = '', auto = false) {
+function renderExportResult(result, warning = '', auto = false, jobId = exportJobId) {
   const text = `Saved as ${result.filename}. ${warning}`.trim();
   if (!Number.isSafeInteger(result.downloadId) || result.downloadId < 0) {
-    showProgress(text, 100, 'done');
+    renderProgress(text, 100, 'done');
     return;
   }
   try {
@@ -255,7 +268,6 @@ function showExportResult(result, warning = '', auto = false) {
     progressEl.style.cssText = 'position:fixed;bottom:20px;right:20px;width:min(328px,calc(100vw - 32px));z-index:2147483647;';
     progressIsResult = true;
     progressThemeCleanup = bindProgressTheme(progressEl);
-    const jobId = exportJobId;
     progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, () => {
       if (jobId) chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId }).catch(() => {});
       hideProgress();
@@ -264,8 +276,18 @@ function showExportResult(result, warning = '', auto = false) {
   } catch (error) {
     console.warn('[GCE] Saved-file notification unavailable:', error);
     try { hideProgress(); } catch { progressEl = null; }
-    showProgress(text, 100, 'done');
+    renderProgress(text, 100, 'done');
   }
+}
+
+function showExportResult(result, warning = '', auto = false) {
+  const text = `Saved as ${result.filename}. ${warning}`.trim();
+  if (!Number.isSafeInteger(result.downloadId) || result.downloadId < 0) {
+    showProgress(text, 100, 'done');
+    return;
+  }
+  try { renderExportResult(result, warning, auto); }
+  catch (error) { console.warn('[GCE] Saved-file notification unavailable:', error); }
   try {
     chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent: 100, state: 'done',
       jobId: exportJobId, phase: 'download', conversationName: exportName,
@@ -273,12 +295,25 @@ function showExportResult(result, warning = '', auto = false) {
   } catch { /* A saved file stays successful if its extension context closes. */ }
 }
 
+function mirrorExportJob(job) {
+  if (exportInProgress || !job?.jobId) return;
+  if (mirroredExportJob && (job.jobId === mirroredExportJob.jobId
+    ? job.revision <= mirroredExportJob.revision : job.startedAt < mirroredExportJob.startedAt)) return;
+  mirroredExportJob = job;
+  progressJobId = job.jobId;
+  if (job.acknowledged) { hideProgress(); return; }
+  try {
+    if (Number.isSafeInteger(job.downloadId)) renderExportResult(job, job.warning, job.auto, job.jobId);
+    else renderProgress(job.text, job.percent, job.state);
+  } catch (error) { console.warn('[GCE] Export notification unavailable:', error); }
+}
+
 function waitForDocumentVisible(signal = null) {
   throwIfAborted(signal);
   if (!document.hidden) return Promise.resolve(false);
   const job = exportJobId;
   const previous = lastExportProgress;
-  if (job) showProgress('Paused. Return to Chat to resume.', previous.percent, 'paused');
+  if (job) showProgress(exportInWindow ? 'Paused. Restore the export window to resume.' : 'Paused. Return to Chat to resume.', previous.percent, 'paused');
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       document.removeEventListener('visibilitychange', visible);
@@ -295,6 +330,38 @@ function waitForDocumentVisible(signal = null) {
     signal?.addEventListener('abort', cancel, { once: true });
     if (signal?.aborted) cancel();
     else visible();
+  });
+}
+
+async function waitForDocumentPaint(signal = null) {
+  const wasHidden = await waitForDocumentVisible(signal);
+  throwIfAborted(signal);
+  if (typeof requestAnimationFrame !== 'function') return wasHidden;
+  const job = exportJobId;
+  const previous = lastExportProgress;
+  return new Promise((resolve, reject) => {
+    let frame, paused = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      cancelAnimationFrame(frame);
+      signal?.removeEventListener('abort', cancel);
+    };
+    const cancel = () => { cleanup(); reject(createAbortError()); };
+    const painted = () => {
+      cleanup();
+      if (paused && job && exportJobId === job) showProgress(previous.text || 'Resuming export…', previous.percent, 'working');
+      resolve(wasHidden || paused);
+    };
+    // Visible documents can also stop painting when their window is covered
+    // or the computer locks. An idle timer alone cannot prove history is done.
+    const timer = setTimeout(() => {
+      paused = true;
+      if (job && exportJobId === job) showProgress(exportInWindow
+        ? 'Paused. Show the export window to resume.' : 'Paused. Return to Chat to resume.', previous.percent, 'paused');
+    }, 750);
+    frame = requestAnimationFrame(() => { frame = requestAnimationFrame(painted); });
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
   });
 }
 
@@ -339,7 +406,7 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null, isCurr
 
   const dedupMap = new Map();
   const collectCurrent = async () => {
-    if (document.hidden) await waitForDocumentVisible(signal);
+    await waitForDocumentPaint(signal);
     ensureCurrentConversation(isCurrent);
     for (const msg of [...extractMessages(extractionCache, container), ...await threads.collect()]) {
       const key = msg._dedupKey || `${msg.sender}|${msg.absoluteTimestamp}|${(msg.text || '').slice(0, 80)}`;
@@ -360,7 +427,7 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null, isCurr
 
     while (batches < MAX_BATCHES) {
       throwIfAborted(signal);
-      if (document.hidden) await waitForDocumentVisible(signal);
+      await waitForDocumentPaint(signal);
       ensureCurrentConversation(isCurrent);
       batches++;
 
@@ -444,18 +511,19 @@ async function waitForThreadCondition(read, signal = null, timeoutMs = 5000, req
   const visibilityChanged = () => { if (document.hidden) wasHidden = true; };
   if (requireVisible) document.addEventListener?.('visibilitychange', visibilityChanged);
   try {
-    do {
+    while (true) {
       if (requireVisible && (wasHidden || document.hidden)) {
         if (document.hidden) await waitForDocumentVisible(signal);
         wasHidden = false;
         deadline = Date.now() + timeoutMs;
       }
       throwIfAborted(signal);
+      if (requireVisible && await waitForDocumentPaint(signal)) deadline = Date.now() + timeoutMs;
       const value = read();
       if (value) return value;
+      if (Date.now() >= deadline) return null;
       await sleep(100, signal);
-    } while ((requireVisible && (wasHidden || document.hidden)) || Date.now() < deadline);
-    return null;
+    }
   } finally {
     if (requireVisible) document.removeEventListener?.('visibilitychange', visibilityChanged);
   }
@@ -536,7 +604,22 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
   const previousTop = previous?.scrollTop || 0;
   const initialUrl = typeof location !== 'undefined' ? location.href : '';
   let lastOpened = '';
+  let closedForMain = false;
   const failures = [];
+
+  async function revealMain() {
+    if (document.hidden) await waitForDocumentVisible(signal);
+    if (main.clientHeight > 0) return;
+    ensureCurrentConversation(isCurrent);
+    const view = lastOpened && findThreadView(lastOpened);
+    const close = view?.closest(SEL.threadPanel)?.querySelector(SEL.threadClose);
+    if (!close) throw new Error('The conversation timeline is hidden. Restore the export window and retry.');
+    close.click();
+    closedForMain = true;
+    if (!await waitForThreadCondition(() => main.clientHeight > 0, signal)) {
+      throw new Error('Could not return from the thread to the conversation timeline. Please retry.');
+    }
+  }
 
   return {
     get failed() { return failures.length; },
@@ -564,6 +647,7 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
           onProgress?.(`Loading thread ${visited.size}...`);
           try {
             lastOpened = topic;
+            closedForMain = false;
             open.click();
             const view = await waitForThreadCondition(() => findThreadView(topic), signal);
             if (!view) {
@@ -581,7 +665,10 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
           }
         }
       } finally {
-        if (!isCurrent || isCurrent()) restoreScrollPosition(main, distance, anchor);
+        if (!isCurrent || isCurrent()) {
+          if (!signal?.aborted) await revealMain();
+          restoreScrollPosition(main, distance, anchor);
+        }
       }
       return messages;
     },
@@ -589,9 +676,9 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
       if (!lastOpened || (isCurrent && !isCurrent()) || (initialUrl && !isSameConversationUrl(initialUrl, location.href))) return;
       // Leave a thread the user opened during the scan alone.
       const view = await waitForThreadCondition(() => findThreadView(), null, 500, false);
-      if (!view || threadTopic(view) !== lastOpened) return;
+      if ((!view && !closedForMain) || (view && threadTopic(view) !== lastOpened)) return;
       if (previousTopic) {
-        if (threadTopic(view) !== previousTopic) {
+        if (!view || threadTopic(view) !== previousTopic) {
           const parent = messageNodes(main).find(node => node.getAttribute(SEL.attrs.groupId) === previousTopic);
           const open = parent?.querySelector(SEL.threadOpen);
           if (!open) return;
@@ -599,7 +686,7 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
         }
         const restored = await waitForThreadCondition(() => findThreadView(previousTopic), null, 1000, false);
         if (restored) restored.scrollTop = previousTop;
-      } else {
+      } else if (view) {
         view.closest(SEL.threadPanel)?.querySelector(SEL.threadClose)?.click();
       }
     }
@@ -651,18 +738,21 @@ async function waitForHistoryMutation(container, initialHeight, initialOldest, t
       if (frame !== null) cancelAnimationFrame(frame);
     };
 
-    const finish = () => {
+    const finish = (painted = false) => {
       if (settled) return;
       settled = true;
       cleanup();
-      if (document.hidden) {
-        waitForDocumentVisible(signal).then(() => {
-          if (typeof Event === 'function') container.dispatchEvent?.(new Event('scroll'));
-          return waitForHistoryMutation(container, initialHeight, initialOldest, timeoutMs, signal, renderedStep);
-        }).then(resolve, reject);
+      if (painted && !document.hidden) {
+        resolve(container.scrollHeight !== initialHeight || getOldestTimestamp(container) !== initialOldest);
         return;
       }
-      resolve(container.scrollHeight !== initialHeight || getOldestTimestamp(container) !== initialOldest);
+      waitForDocumentPaint(signal).then(resumed => {
+        if (resumed) {
+          if (typeof Event === 'function') container.dispatchEvent?.(new Event('scroll'));
+          return waitForHistoryMutation(container, initialHeight, initialOldest, timeoutMs, signal, renderedStep);
+        }
+        return container.scrollHeight !== initialHeight || getOldestTimestamp(container) !== initialOldest;
+      }).then(resolve, reject);
     };
 
     const cancel = () => {
@@ -689,7 +779,7 @@ async function waitForHistoryMutation(container, initialHeight, initialOldest, t
       frame = requestAnimationFrame(() => {
         frame = requestAnimationFrame(() => {
           frame = null;
-          if (!settleTimer) finish();
+          if (!settleTimer) finish(true);
         });
       });
     }
@@ -1386,8 +1476,10 @@ function isSameConversationUrl(a, b) {
 }
 
 // Resolves to 'done', 'empty', 'error', 'cancelled' or 'busy'.
-async function runExport({ format = 'txt', loadAll = true, includeMedia = true, dateFrom = '', incremental = false, sourceUrl = '', auto = false, jobId = null }) {
+async function runExport({ format = 'txt', loadAll = true, includeMedia = true, dateFrom = '', incremental = false, sourceUrl = '', auto = false, jobId = null, collectionWindow = false }) {
   if (exportInProgress) return 'busy';
+  mirroredExportJob = null;
+  exportInWindow = collectionWindow;
   exportInProgress = true;
   const controller = new AbortController();
   exportController = controller;
@@ -1703,14 +1795,21 @@ async function startExportRequest(options) {
     dateFrom: options.dateFrom || '',
     incremental: options.incremental === true,
     sourceUrl: options.sourceUrl || '',
+    collectionWindow: options.collectionWindow === true,
     jobId
   }).catch(error => console.error('[GCE] Export error:', error));
   return { received: true, jobId };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'exportJobUpdate' && !sender.tab) {
+    mirrorExportJob(msg.job);
+    sendResponse({ received: true });
+    return false;
+  }
   if (msg.action === 'getExportJob') {
-    sendResponse({ jobId: exportInProgress ? exportJobId : null, phase: exportPhase, ...lastExportProgress });
+    sendResponse(!exportInProgress && msg.jobId && lastExportReport?.jobId === msg.jobId
+      ? lastExportReport : { jobId: exportInProgress ? exportJobId : null, phase: exportPhase, ...lastExportProgress });
     return false;
   }
   if (msg.action === 'cancelExportJob') {
