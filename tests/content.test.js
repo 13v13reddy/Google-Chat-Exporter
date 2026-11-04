@@ -7,7 +7,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 const { installThreadFixture } = require('./helpers/thread-fixture');
 
-function loadContent(target = 'chrome') {
+function loadContent(target = 'chrome', { includeTheme = true } = {}) {
   const event = { addListener(fn) { this.listener = fn; } };
   const selectors = {
     frameName: 'single_full_screen',
@@ -56,9 +56,66 @@ function loadContent(target = 'chrome') {
     window
   });
   const filename = path.join(__dirname, '..', target, 'content.js');
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, 'theme.js'), 'utf8'), context);
+  if (includeTheme) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, 'theme.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   return context;
+}
+
+function installProgressDom(context) {
+  const hosts = [];
+  class Element {
+    constructor() { this.style = {}; this.children = []; this.attributes = {}; this.slots = new Map(); }
+    appendChild(element) { this.children.push(element); return element; }
+    addEventListener() {}
+    getAttribute(name) { return this.attributes[name] ?? null; }
+    querySelector(selector) {
+      if (!this.slots.has(selector)) this.slots.set(selector, new Element());
+      return this.slots.get(selector);
+    }
+    remove() { this.removed = true; }
+    setAttribute(name, value) { this.attributes[name] = String(value); }
+  }
+  context.document.createElement = () => new Element();
+  context.document.documentElement = { appendChild(element) { hosts.push(element); return element; } };
+  return hosts;
+}
+
+for (const target of ['chrome', 'firefox']) {
+  test(`${target}: content ping reports missing helpers to the background`, () => {
+    const c = loadContent(target, { includeTheme: false });
+    c.mountExportResult = () => {};
+    let response;
+    c.chrome.runtime.onMessage.listener({ action: 'ping' }, { frameId: 5 }, value => { response = value; });
+
+    assert.equal(response.alive, true);
+    assert.equal(response.themeReady, false);
+    assert.equal(response.resultHostReady, true);
+    assert.equal(response.frameId, 5);
+  });
+}
+
+for (const target of ['chrome', 'firefox']) {
+  test(`${target}: export succeeds and displays its result if the theme script is missing`, async () => {
+    const c = loadContent(target, { includeTheme: false });
+    const hosts = installProgressDom(c);
+    c.isInChatFrame = () => true;
+    c.getConversationName = () => 'Fixture';
+    c.extractMessages = () => [{ sender: 'Alice', text: 'hello', media: [] }];
+    c.mountExportResult = () => () => {};
+    const packageCalls = [];
+    c.chrome.runtime.sendMessage = async message => {
+      if (message.action === 'packageAndDownload') {
+        packageCalls.push(message);
+        return { success: true, filename: 'fixture.md', downloadId: 42 };
+      }
+      return {};
+    };
+
+    assert.equal(await c.runExport({ format: 'md', loadAll: false }), 'done');
+    assert.equal(packageCalls.length, 1);
+    assert.equal(hosts.length, 2, 'shows progress and then the saved result');
+    assert.ok(hosts.every(host => host.getAttribute('data-gce-theme') === 'light'));
+  });
 }
 
 test('restoreScrollPosition preserves distance from the bottom', () => {

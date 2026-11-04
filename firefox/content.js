@@ -100,6 +100,14 @@ let exportPhase = 'idle';
 let exportName = '';
 let lastExportProgress = { text: '', percent: 0, state: 'working' };
 
+function bindProgressTheme(element) {
+  if (typeof GCETheme === 'undefined' || typeof GCETheme.bind !== 'function') {
+    element.setAttribute('data-gce-theme', 'light');
+    return () => {};
+  }
+  return GCETheme.bind(element);
+}
+
 function showProgress(text, percent, state = 'working') {
   lastExportProgress = { text, percent, state };
   progressJobId = exportJobId;
@@ -236,7 +244,7 @@ function showProgress(text, percent, state = 'working') {
       </div>`;
 
     progressEl.appendChild(style);
-    progressThemeCleanup = GCETheme.bind(progressEl);
+    progressThemeCleanup = bindProgressTheme(progressEl);
     document.documentElement.appendChild(progressEl);
     progressEl.querySelector('.gce-close').addEventListener('click', () => {
       if (exportInProgress && exportController) {
@@ -302,7 +310,7 @@ function showExportResult(result, warning = '', auto = false) {
   progressEl.id = 'gce-progress';
   progressEl.style.cssText = 'position:fixed;bottom:20px;right:20px;width:min(328px,calc(100vw - 32px));z-index:2147483647;';
   progressIsResult = true;
-  progressThemeCleanup = GCETheme.bind(progressEl);
+  progressThemeCleanup = bindProgressTheme(progressEl);
   const jobId = exportJobId;
   progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, () => {
     if (jobId) chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId }).catch(() => {});
@@ -1739,7 +1747,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   if (msg.action === 'ping') {
-    sendResponse({ alive: true, inChatFrame: isInChatFrame() });
+    sendResponse({
+      alive: true,
+      inChatFrame: isInChatFrame(),
+      themeReady: typeof GCETheme !== 'undefined' && typeof GCETheme.bind === 'function',
+      resultHostReady: typeof mountExportResult === 'function',
+      frameId: sender?.frameId
+    });
     return false;
   }
 

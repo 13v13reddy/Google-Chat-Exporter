@@ -62,6 +62,47 @@ function loadBackground(target = 'chrome', withZip = false, initialStorage = {})
   return context;
 }
 
+test('content health check repairs a missing theme helper without reinjecting content.js', async () => {
+  const c = loadBackground();
+  let injected;
+  c.chrome.tabs.sendMessage = (_tabId, message, callback) => {
+    assert.equal(message.action, 'ping');
+    callback({ alive: true, themeReady: false, resultHostReady: true, frameId: 3 });
+  };
+  c.chrome.scripting.executeScript = async details => { injected = details; };
+  c.sleep = async () => {};
+
+  assert.equal(await c.ensureContentScript(7), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(injected)), { target: { tabId: 7, frameIds: [3] }, files: ['theme.js'] });
+});
+
+test('content health check restores missing helper scripts in order', async () => {
+  const c = loadBackground();
+  let injected;
+  c.chrome.tabs.sendMessage = (_tabId, _message, callback) => {
+    callback({ alive: true, themeReady: false, resultHostReady: false, frameId: 0 });
+  };
+  c.chrome.scripting.executeScript = async details => { injected = details; };
+  c.sleep = async () => {};
+
+  assert.equal(await c.ensureContentScript(7), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(injected)), { target: { tabId: 7, frameIds: [0] }, files: ['theme.js', 'result-host.js'] });
+});
+
+test('content health check installs the complete script set when ping fails', async () => {
+  const c = loadBackground();
+  let injected;
+  c.chrome.tabs.sendMessage = (_tabId, _message, callback) => callback(undefined);
+  c.chrome.scripting.executeScript = async details => { injected = details; };
+  c.sleep = async () => {};
+
+  assert.equal(await c.ensureContentScript(7), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(injected)), {
+    target: { tabId: 7, allFrames: true },
+    files: ['theme.js', 'result-host.js', 'content.js']
+  });
+});
+
 test('safeResourceUrl permits HTTPS and safe packaged media paths', () => {
   const context = loadBackground();
   assert.equal(context.safeResourceUrl('https://example.com/a.png'), 'https://example.com/a.png');

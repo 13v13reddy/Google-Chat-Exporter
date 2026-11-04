@@ -216,7 +216,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         const tab = msg.tabId ? await chrome.tabs.get(msg.tabId) : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
         if (!tab) { sendResponse({ success: false, error: 'No active tab found.' }); return; }
-        await triggerExport(tab, msg.format || 'txt', msg.settings);
+        const started = await triggerExport(tab, msg.format || 'txt', msg.settings);
+        if (!started) { sendResponse({ success: false, error: 'Could not prepare Google Chat for export. Refresh the tab and try again.' }); return; }
         sendResponse({ success: true });
       } catch (err) {
         sendResponse({ success: false, error: err.message });
@@ -311,14 +312,14 @@ async function triggerExport(contextMenuTab, format, overrides = {}) {
   const targetTabId = await resolveTargetTab(contextMenuTab);
   if (!targetTabId) {
     console.error('[GCE BG] Could not find a Google Chat tab to export.');
-    return;
+    return false;
   }
 
-  // Ensure content script is alive in that tab; re-inject if needed
+  // Ensure the content script and its UI helpers are ready in that tab.
   const injected = await ensureContentScript(targetTabId);
   if (!injected) {
     console.error('[GCE BG] Could not inject content script into tab', targetTabId);
-    return;
+    throw new Error('Could not prepare Google Chat for export. Refresh the tab and try again.');
   }
 
   // Send export command
@@ -343,6 +344,7 @@ async function triggerExport(contextMenuTab, format, overrides = {}) {
       }).catch(err => console.error('[GCE BG] executeScript fallback failed:', err));
     }
   });
+  return true;
 }
 
 /**
@@ -376,18 +378,34 @@ async function resolveTargetTab(contextMenuTab) {
  * may not have a live message channel.
  */
 async function ensureContentScript(tabId) {
-  // Try a ping first
-  const alive = await new Promise(resolve => {
+  // Check both liveness and the helpers required by the current content script.
+  const status = await new Promise(resolve => {
     chrome.tabs.sendMessage(tabId, { action: 'ping' }, resp => {
       if (chrome.runtime.lastError || !resp?.alive) {
-        resolve(false);
+        resolve(null);
       } else {
-        resolve(true);
+        resolve(resp);
       }
     });
   });
 
-  if (alive) return true;
+  if (status) {
+    const files = [];
+    if (status.themeReady !== true) files.push('theme.js');
+    if (status.resultHostReady !== true) files.push('result-host.js');
+    if (!files.length) return true;
+
+    try {
+      const target = Number.isInteger(status.frameId)
+        ? { tabId, frameIds: [status.frameId] }
+        : { tabId, allFrames: true };
+      await chrome.scripting.executeScript({ target, files });
+      return true;
+    } catch (err) {
+      console.error('[GCE BG] Failed to restore content helpers:', err);
+      return false;
+    }
+  }
 
   // Re-inject the content script
   try {
