@@ -8,6 +8,7 @@ const channel = params.get('channel') || '';
 const openButton = document.getElementById('open');
 const heading = document.getElementById('heading');
 const errorLabel = document.getElementById('error');
+const resultCard = document.getElementById('result-card');
 let ready = false;
 let opening = false;
 let generation = 0;
@@ -37,6 +38,7 @@ async function refreshDownload() {
     if (!item || item.byExtensionId !== chrome.runtime.id) throw new Error('Export unavailable. Open it from your browser’s Downloads.');
     document.getElementById('filename').textContent = item.filename.split(/[\\/]/).pop() || params.get('filename') || 'Export';
     ready = item.state === 'complete' && item.exists !== false;
+    resultCard.setAttribute('data-state', ready ? (params.get('warning') ? 'warning' : 'saved') : item.state === 'in_progress' ? 'saving' : 'error');
     openButton.disabled = !ready || opening;
     heading.textContent = ready ? (params.get('warning') ? 'Export saved with warnings' : 'Export saved') : item.state === 'in_progress' ? 'Saving export…' : 'Export unavailable';
     if (item.state === 'interrupted') showError('Download interrupted. Check your browser’s Downloads.');
@@ -45,6 +47,7 @@ async function refreshDownload() {
   } catch (error) {
     if (current !== generation) return;
     ready = false;
+    resultCard.setAttribute('data-state', 'error');
     openButton.disabled = true;
     heading.textContent = 'Export unavailable';
     showError(error?.message || 'Could not read the export. Open it from your browser’s Downloads.');

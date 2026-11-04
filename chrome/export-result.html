@@ -5,38 +5,107 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Export result</title>
   <style>
+    :root {
+      color-scheme: light;
+      --surface: #fff;
+      --ink: #292b27;
+      --muted: #70736d;
+      --line: #e2e3de;
+      --hover: #f0f1ed;
+      --accent: #356b83;
+      --accent-hover: #2a566a;
+      --on-accent: #fff;
+      --success: #4b6b52;
+      --warning: #956400;
+      --danger: #a64d46;
+      --danger-wash: #f7ecea;
+    }
+    :root[data-gce-theme="dark"] {
+      color-scheme: dark;
+      --surface: #252825;
+      --ink: #e7eae5;
+      --muted: #adb4ac;
+      --line: #3b403b;
+      --hover: #303530;
+      --accent: #a6c9d8;
+      --accent-hover: #c0dce7;
+      --on-accent: #1d201e;
+      --success: #a6c5a8;
+      --warning: #d7b36a;
+      --danger: #e6a39b;
+      --danger-wash: #422e2c;
+    }
     * { box-sizing: border-box; }
-    html { color-scheme: light; background: transparent; --surface: #fff; --text: #202124; --secondary: #3c4043; --muted: #5f6368; --border: #dadce0; --hover: #f1f3f4; --accent: #1a73e8; --accent-hover: #1558b0; --on-accent: #fff; --error: #b3261e; --disabled: #e8eaed; }
-    html[data-gce-theme="dark"] { color-scheme: dark; --surface: #202124; --text: #e8eaed; --secondary: #d2d5da; --muted: #bdc1c6; --border: #5f6368; --hover: #35363a; --accent: #8ab4f8; --accent-hover: #aecbfa; --on-accent: #202124; --error: #f28b82; --disabled: #3c4043; }
-    body { margin: 0; padding: 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: var(--text); }
-    .result { padding: 14px 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
-    .heading { display: flex; align-items: center; gap: 8px; }
-    h1 { margin: 0; flex: 1; font-size: 13px; font-weight: 600; }
-    .close { display: grid; place-items: center; width: 28px; height: 28px; padding: 4px; border: 0; border-radius: 4px; background: transparent; color: var(--muted); cursor: pointer; }
-    .close:hover { color: var(--text); background: var(--hover); }
-    .filename { margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: var(--secondary); overflow-wrap: anywhere; }
-    .notice { margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--muted); overflow-wrap: anywhere; }
-    #error { color: var(--error); }
-    .actions { display: flex; justify-content: flex-end; margin-top: 12px; }
-    .open { min-width: 64px; min-height: 32px; padding: 6px 16px; border: 0; border-radius: 6px; background: var(--accent); color: var(--on-accent); font: 600 12px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; cursor: pointer; }
-    .open:hover { background: var(--accent-hover); }
-    .open:disabled { background: var(--disabled); color: var(--muted); cursor: default; }
+    html { background: transparent; }
+    body {
+      margin: 0;
+      padding: 3px;
+      color: var(--ink);
+      font: 12px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .result {
+      padding: 12px 13px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+    .topline { display: flex; align-items: center; gap: 7px; }
+    .state-mark { width: 7px; height: 7px; border-radius: 50%; background: var(--success); flex: 0 0 auto; }
+    .result[data-state="saving"] .state-mark { background: var(--accent); }
+    .result[data-state="warning"] .state-mark { background: var(--warning); }
+    .result[data-state="error"] .state-mark { background: var(--danger); }
+    .eyebrow { flex: 1; color: var(--muted); font-size: 9px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; }
+    h1 { margin: 6px 0 0; font: 400 17px/1.2 Georgia, "Iowan Old Style", serif; letter-spacing: -.025em; }
+    .close {
+      display: grid;
+      width: 26px;
+      height: 26px;
+      place-items: center;
+      padding: 0;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .close:hover { background: var(--hover); color: var(--ink); }
+    .close svg { width: 14px; height: 14px; }
+    .filename { margin: 6px 0 0; color: var(--muted); font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .notice { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+    #error { padding: 7px 8px; border-radius: 4px; background: var(--danger-wash); color: var(--danger); }
+    .actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+    .open {
+      min-width: 82px;
+      min-height: 30px;
+      padding: 5px 12px;
+      border: 1px solid var(--accent);
+      border-radius: 5px;
+      background: var(--accent);
+      color: var(--on-accent);
+      font: 600 11px/1.4 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+    }
+    .open:hover:not(:disabled) { border-color: var(--accent-hover); background: var(--accent-hover); }
+    .open:disabled { border-color: var(--line); background: var(--hover); color: var(--muted); cursor: default; }
     button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; } }
   </style>
 </head>
 <body>
-  <section class="result" aria-labelledby="heading">
-    <div class="heading">
-      <h1 id="heading" aria-live="polite">Saving export…</h1>
+  <section class="result" id="result-card" aria-labelledby="heading">
+    <div class="topline">
+      <span class="state-mark" aria-hidden="true"></span>
+      <span class="eyebrow">Export</span>
       <button class="close" id="close" type="button" aria-label="Dismiss export notification" title="Dismiss">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
       </button>
     </div>
+    <h1 id="heading" aria-live="polite">Saving export…</h1>
     <p class="filename" id="filename"></p>
     <p class="notice" id="warning" hidden></p>
-    <p class="notice" id="next" hidden>Auto-export: open the next channel.</p>
+    <p class="notice" id="next" hidden>Open the next channel to continue.</p>
     <p class="notice" id="error" role="alert" hidden></p>
-    <div class="actions"><button class="open" id="open" type="button" disabled>Open</button></div>
+    <div class="actions"><button class="open" id="open" type="button" disabled>Open file</button></div>
   </section>
   <script src="theme.js"></script>
   <script src="export-result.js"></script>

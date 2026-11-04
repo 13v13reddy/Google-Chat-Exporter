@@ -46,7 +46,8 @@ function saveSettings() {
 
 function updateMediaRowVisibility() {
   const isHtml = $('format-select').value === 'html';
-  $('media-row').style.opacity = isHtml ? '1' : '0.45';
+  if (isHtml) $('media-row').classList.remove('is-disabled');
+  else $('media-row').classList.add('is-disabled');
   $('include-media').disabled = !isHtml;
 }
 
@@ -54,6 +55,10 @@ function updateIncrementalControls() {
   const enabled = $('incremental').checked;
   $('load-all').disabled = enabled;
   $('date-from').disabled = enabled;
+  for (const id of ['history-row', 'date-row']) {
+    if (enabled) $(id).classList.add('is-disabled');
+    else $(id).classList.remove('is-disabled');
+  }
 }
 
 // ── Conversation Status Bar ──────────────────────────────────
@@ -108,7 +113,7 @@ async function toggleExportMode() {
   try {
     const resp = await chrome.runtime.sendMessage({ action: 'setExportMode', enabled });
     $('export-mode').checked = resp?.enabled === true;
-    if (resp?.enabled && !visibleJobId && !isExporting) showStatus('Auto-export on: open each channel to export it.', 100, 'done');
+    if (resp?.enabled && !visibleJobId && !isExporting) showStatus('Auto-export is on. Open a channel to save it.', 100, 'done');
   } catch {
     $('export-mode').checked = !enabled;
   }
@@ -163,39 +168,31 @@ async function triggerExport() {
         incremental
       }, () => {
         if (chrome.runtime.lastError) {
-          showStatus('❌ ' + (response?.error || 'Could not start export'), 0, 'error');
+          showStatus(response?.error || 'Could not start export', 0, 'error');
           resetBtn();
         }
       });
     }
 
   } catch (err) {
-    showStatus('❌ ' + err.message, 0, 'error');
+    showStatus(err.message, 0, 'error');
     resetBtn();
   }
 }
 
-function setExporting() {
+function setExporting(label = 'Exporting') {
   isExporting = true;
 
   const btn = $('export-btn');
   btn.disabled = true;
-  btn.innerHTML = `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="animation:spin .7s linear infinite;fill:currentColor;width:17px;height:17px;flex-shrink:0">
-      <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
-    </svg>
-    Exporting...`;
+  btn.innerHTML = `<span class="button-spinner" aria-hidden="true"></span><span>${label}</span>`;
 }
 
 function resetBtn() {
   isExporting = false;
   const btn = $('export-btn');
   btn.disabled = false;
-  btn.innerHTML = `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="fill:currentColor;width:17px;height:17px;flex-shrink:0">
-      <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
-    </svg>
-    Export Current Conversation`;
+  btn.textContent = 'Export conversation';
 }
 
 // ── Status / Progress ────────────────────────────────────────
@@ -233,8 +230,10 @@ function showStatus(text, percent, state = 'working') {
   $('status-area').classList.add('visible');
   $('job-name').hidden = true;
   $('status-text').textContent = text;
+  const safePercent = Number.isFinite(Number(percent)) ? Math.max(0, Math.min(100, Number(percent))) : 0;
+  $('status-value').textContent = state === 'paused' ? 'Paused' : state === 'error' ? 'Failed' : `${Math.round(safePercent)}%`;
   const bar = $('progress-bar');
-  bar.style.width = percent + '%';
+  bar.style.width = safePercent + '%';
   bar.className = 'progress-bar' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
 
   const spinner = $('status-spinner');
@@ -263,7 +262,8 @@ function mergeExportJob(job) {
 
 function renderExportJobs() {
   const all = [...exportJobs.values()].sort((a, b) => b.startedAt - a.startedAt);
-  if (all.some(job => jobActive(job) && job.phase !== 'download')) setExporting();
+  const activeJob = all.find(job => jobActive(job) && job.phase !== 'download');
+  if (activeJob) setExporting(activeJob.phase === 'download' ? 'Saving export' : activeJob.phase === 'packaging' ? 'Preparing file' : 'Exporting');
   else resetBtn();
   const available = all.filter(job => !dismissedJobs.has(job.jobId) && !job.acknowledged);
   const job = available.find(jobActive) || available[0];
@@ -339,11 +339,6 @@ chrome.runtime.onMessage.addListener((msg) => {
     }
   }
 });
-
-// Add spin keyframe to popup
-const style = document.createElement('style');
-style.textContent = `@keyframes spin { to { transform: rotate(360deg); } }`;
-document.head.appendChild(style);
 
 // ── Init ─────────────────────────────────────────────────────
 

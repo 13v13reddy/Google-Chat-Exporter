@@ -11,7 +11,7 @@ test('2.2 retains Gmail-integrated Chat support in Chrome extension', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'chrome', 'manifest.json'), 'utf8'));
   assert.equal(manifest.version, '2.2.0');
   const popup = fs.readFileSync(path.join(root, 'chrome', 'popup.html'), 'utf8');
-  assert.ok(popup.includes(`v${manifest.version}`));
+  assert.match(popup, /<h1>Conversation export<\/h1>/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version, manifest.version);
   assert.ok(manifest.host_permissions.includes('https://mail.google.com/*'));
   assert.ok(manifest.content_scripts.some(script =>
@@ -29,7 +29,7 @@ test('2.2 supports Firefox Add-on with Gecko settings and background scripts', (
   assert.deepEqual(manifest.browser_specific_settings?.gecko?.data_collection_permissions, { required: ['none'] });
   assert.deepEqual(manifest.background.scripts, ['lib/jszip.min.js', 'export-jobs.js', 'background.js']);
   const popup = fs.readFileSync(path.join(root, 'firefox', 'popup.html'), 'utf8');
-  assert.ok(popup.includes(`v${manifest.version}`));
+  assert.match(popup, /<h1>Conversation export<\/h1>/);
   assert.ok(manifest.host_permissions.includes('https://mail.google.com/*'));
   assert.ok(manifest.content_scripts.some(script =>
     script.matches.includes('https://mail.google.com/*')

@@ -122,126 +122,81 @@ function showProgress(text, percent, state = 'working') {
     style.textContent = `
       #gce-progress {
         --gce-surface: #fff;
-        --gce-text: #3c4043;
-        --gce-muted: #5f6368;
-        --gce-hover: #f1f3f4;
-        --gce-track: #e8eaed;
-        --gce-accent: #1a73e8;
-        --gce-success: #188038;
-        --gce-error: #b3261e;
+        --gce-border: #e2e3de;
+        --gce-text: #292b27;
+        --gce-muted: #70736d;
+        --gce-hover: #f0f1ed;
+        --gce-track: #e2e3de;
+        --gce-accent: #356b83;
+        --gce-success: #4b6b52;
+        --gce-error: #a64d46;
         position: fixed;
-        bottom: 24px;
-        right: 24px;
+        right: 18px;
+        bottom: 18px;
         z-index: 2147483647;
-        font-family: 'Google Sans', Roboto, sans-serif;
+        width: min(312px, calc(100vw - 28px));
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--gce-text);
         pointer-events: auto;
       }
+      #gce-progress, #gce-progress * { box-sizing: border-box; }
       #gce-progress[data-gce-theme="dark"] {
         color-scheme: dark;
-        --gce-surface: #202124;
-        --gce-text: #e8eaed;
-        --gce-muted: #bdc1c6;
-        --gce-hover: #35363a;
-        --gce-track: #3c4043;
-        --gce-accent: #8ab4f8;
-        --gce-success: #81c995;
-        --gce-error: #f28b82;
+        --gce-surface: #252825;
+        --gce-border: #3b403b;
+        --gce-text: #e7eae5;
+        --gce-muted: #adb4ac;
+        --gce-hover: #303530;
+        --gce-track: #3b403b;
+        --gce-accent: #a6c9d8;
+        --gce-success: #a6c5a8;
+        --gce-error: #e6a39b;
       }
       .gce-card {
-        background: var(--gce-surface);
-        border-radius: 14px;
-        box-shadow: 0 8px 30px rgba(0,0,0,0.15), 0 2px 8px rgba(0,0,0,0.08);
-        width: 320px;
         overflow: hidden;
-        animation: gce-slide-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+        border: 1px solid var(--gce-border);
+        border-radius: 8px;
+        background: var(--gce-surface);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, .045);
+        animation: gce-appear .16s ease-out;
       }
-      @keyframes gce-slide-in {
-        from { transform: translateY(20px); opacity: 0; }
-        to { transform: translateY(0); opacity: 1; }
-      }
-      .gce-header {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        padding: 14px 16px 10px;
-      }
-      .gce-spinner {
-        width: 18px;
-        height: 18px;
-        border: 2.5px solid var(--gce-track);
-        border-top-color: var(--gce-accent);
-        border-radius: 50%;
-        animation: gce-spin 0.7s linear infinite;
-        flex-shrink: 0;
-        transition: border-color 0.3s;
-      }
+      @keyframes gce-appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+      .gce-topline { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 0; }
+      .gce-kicker { color: var(--gce-muted); font-size: 9px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; }
+      .gce-percent { color: var(--gce-muted); font: 10px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
+      .gce-main { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 3px 7px 8px 12px; }
+      .gce-spinner { width: 12px; height: 12px; flex: 0 0 auto; border: 1.5px solid var(--gce-track); border-top-color: var(--gce-accent); border-radius: 50%; animation: gce-spin .8s linear infinite; }
       .gce-spinner.done { border-color: var(--gce-success); animation: none; }
       .gce-spinner.error { border-color: var(--gce-error); animation: none; }
-      .gce-spinner.paused { animation: none; border-color: var(--gce-muted); }
+      .gce-spinner.paused { border-top-color: var(--gce-muted); animation: none; }
       @keyframes gce-spin { to { transform: rotate(360deg); } }
-      .gce-label {
-        font-size: 13px;
-        color: var(--gce-text);
-        flex: 1;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        font-weight: 500;
-      }
-      .gce-close {
-        background: none;
-        border: none;
-        font-size: 18px;
-        color: var(--gce-muted);
-        cursor: pointer;
-        padding: 0 2px;
-        line-height: 1;
-        border-radius: 4px;
-        flex-shrink: 0;
-      }
-      .gce-close:hover { color: var(--gce-text); background: var(--gce-hover); }
-      .gce-close:focus-visible { outline: 2px solid var(--gce-accent); outline-offset: 2px; }
-      .gce-bar-wrap { height: 4px; background: var(--gce-track); }
-      .gce-bar {
-        height: 100%;
-        background: var(--gce-accent);
-        width: 0%;
-        transition: width 0.4s ease, background 0.3s ease;
-        border-radius: 0 2px 2px 0;
-      }
+      .gce-label { min-width: 0; flex: 1; color: var(--gce-text); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+      .gce-close { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--gce-muted); font: inherit; cursor: pointer; }
+      .gce-close:hover { background: var(--gce-hover); color: var(--gce-text); }
+      .gce-close:focus-visible { outline: 2px solid var(--gce-accent); outline-offset: 1px; }
+      .gce-close svg { display: block; width: 14px; height: 14px; }
+      .gce-bar-wrap { height: 2px; background: var(--gce-track); }
+      .gce-bar { height: 100%; width: 0; background: var(--gce-accent); transition: width .24s ease, background .16s ease; }
       .gce-bar.done { background: var(--gce-success); }
       .gce-bar.error { background: var(--gce-error); }
+      @media (prefers-reduced-motion: reduce) { .gce-card, .gce-spinner, .gce-bar { animation-duration: .01ms; transition-duration: .01ms; } }
     `;
 
     progressEl.innerHTML = `
-      <div class="gce-card">
-        <div class="gce-header">
-          <div class="gce-logo" style="width:22px;height:22px;flex-shrink:0;display:flex;align-items:center;">
-            <svg width="22" height="22" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" style="border-radius:4px;">
-              <rect width="512" height="512" rx="40" fill="#f8f9fa"/>
-              <g transform="translate(56, 56) scale(1.25)">
-                <path d="M76.37 0.51l0.01 76.47L0 76.96V20.77c0.567-3.973 1.743-7.31 3.53-10.01C7.937 4.08 14.343 0.717 22.75 0.67 40.523 0.577 58.397 0.523 76.37 0.51z" fill="#0066da"/>
-                <path d="M76.37 0.51l157.42 0.02c0.332 0 0.653 0.101 0.92 0.29l0.37 0.27c-0.107 0.04-0.197 0.083-0.27 0.13a0.297 0.297 0 00-0.17 0.28l-0.02 75.51H76.41l-0.03-0.03L76.37 0.51z" fill="#fbbc04"/>
-                <path d="M235.08 1.09l75.45 75.68-75.91 0.24 0.02-75.51c0-0.127 0.057-0.22 0.17-0.28 0.073-0.047 0.163-0.09 0.27-0.13z" fill="#ea4335"/>
-                <path d="M0 76.96l76.38 0.02 0.03 0.03 0.02 105.68L0 182.67V76.96z" fill="#2684fc"/>
-                <path d="M310.53 76.77l0.47 0.34v161.9c-1.773 9.687-6.793 15.943-15.06 18.77-2.947 1.013-7.29 1.513-13.03 1.5-37.26-0.06-74.9-0.117-112.92-0.17-5.52-0.007-11.12 0.033-16.8 0.12-0.313 0.007-0.58 0.12-0.8 0.34a15823.329 15823.329 0 00-56 56.02c-2.87 2.89-6.12 4.5-10.24 3.89-3.84-0.567-6.67-2.547-8.49-5.94-0.767-1.44-1.157-4.067-1.17-7.88-0.047-15.46-0.063-30.97-0.05-46.53l-0.01-38.28 37.78-37.78c0.332-0.333 0.786-0.52 1.26-0.52l118.3 0.04c0.455 0 0.83-0.375 0.83-0.83l-0.03-104.75h0.05l75.91-0.24z" fill="#00ac47"/>
-                <path d="M76.43 182.69v38.16l0.01 38.28c-15.98 0.093-31.823 0.123-47.53 0.09-6.547-0.013-11.263-0.527-14.15-1.54-8.093-2.827-13.013-9.093-14.76-18.8v-56.21l76.43 0.02z" fill="#00832d"/>
-              </g>
-              <circle cx="380" cy="380" r="90" fill="#ffffff" />
-              <circle cx="380" cy="380" r="85" fill="#ffffff" stroke="#e8eaed" stroke-width="5" />
-              <g transform="translate(345, 325)">
-                <path d="M35,0 L35,65" stroke="#1a73e8" stroke-width="18" stroke-linecap="round" />
-                <path d="M5,40 L35,70 L65,40" stroke="#1a73e8" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none" />
-                <rect x="5" y="85" width="60" height="12" rx="6" fill="#34a853" />
-              </g>
-            </svg>
-          </div>
-          <div class="gce-spinner"></div>
-          <span class="gce-label">Initializing...</span>
-          <button class="gce-close" type="button" title="Dismiss" aria-label="Dismiss export notification">&times;</button>
+      <section class="gce-card" aria-label="Export progress">
+        <div class="gce-topline">
+          <span class="gce-kicker">Export progress</span>
+          <span class="gce-percent" aria-label="2 percent complete">2%</span>
         </div>
-        <div class="gce-bar-wrap"><div class="gce-bar"></div></div>
-      </div>`;
+        <div class="gce-main">
+          <span class="gce-spinner" aria-hidden="true"></span>
+          <span class="gce-label" role="status" aria-live="polite">Preparing export…</span>
+          <button class="gce-close" type="button" title="Cancel export" aria-label="Cancel export">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <div class="gce-bar-wrap" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="2"><div class="gce-bar"></div></div>
+      </section>`;
 
     progressEl.appendChild(style);
     progressThemeCleanup = bindProgressTheme(progressEl);
@@ -260,16 +215,32 @@ function showProgress(text, percent, state = 'working') {
   }
 
   const label = progressEl.querySelector('.gce-label');
+  const percentLabel = progressEl.querySelector('.gce-percent');
+  const progressTrack = progressEl.querySelector('.gce-bar-wrap');
   const bar = progressEl.querySelector('.gce-bar');
   const spinner = progressEl.querySelector('.gce-spinner');
+  const closeButton = progressEl.querySelector('.gce-close');
+  const safePercent = Number.isFinite(Number(percent)) ? Math.max(0, Math.min(100, Number(percent))) : 0;
+  const roundedPercent = Math.round(safePercent);
+  progressEl.setAttribute('data-state', state);
 
   if (label) { label.textContent = text; label.title = text; }
+  if (percentLabel) {
+    percentLabel.textContent = `${roundedPercent}%`;
+    percentLabel.setAttribute('aria-label', `${roundedPercent} percent complete`);
+  }
+  if (progressTrack) progressTrack.setAttribute('aria-valuenow', String(roundedPercent));
   if (bar) {
-    bar.style.width = percent + '%';
+    bar.style.width = safePercent + '%';
     bar.className = 'gce-bar' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
   }
   if (spinner) {
     spinner.className = 'gce-spinner' + (state === 'done' ? ' done' : state === 'error' ? ' error' : state === 'paused' ? ' paused' : '');
+  }
+  if (closeButton) {
+    const closeLabel = exportInProgress && exportController ? 'Cancel export' : 'Dismiss export notification';
+    closeButton.title = closeLabel;
+    closeButton.setAttribute('aria-label', closeLabel);
   }
 
   // Relay to background for popup display
@@ -327,7 +298,7 @@ function waitForDocumentVisible(signal = null) {
   if (!document.hidden) return Promise.resolve(false);
   const job = exportJobId;
   const previous = lastExportProgress;
-  if (job) showProgress('Paused — return to Chat to resume.', previous.percent, 'paused');
+  if (job) showProgress('Paused. Return to Chat to resume.', previous.percent, 'paused');
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       document.removeEventListener('visibilitychange', visible);
@@ -1448,7 +1419,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     await loadSelectors();
 
     if (!isInChatFrame()) {
-      showProgress('⚠️ Please open a Google Chat conversation first.', 0, 'error');
+      showProgress('Open a Google Chat conversation before exporting.', 0, 'error');
       scheduleHideProgress(5000);
       exportInProgress = false;
       exportController = null;
@@ -1461,7 +1432,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     exportJobId = `job-${crypto.randomUUID()}`;
     exportPhase = 'history';
     exportName = initialName || 'Google Chat';
-    showProgress('⏳ Preparing export...', 2);
+    showProgress('Preparing export…', 2);
     conversationMatches = () => (!initialUrl || isSameConversationUrl(initialUrl, location.href)) &&
       (!initialPageScope || initialPageScope === checkpointScopeFromPage(format, includeMedia)) &&
       (!!initialPageScope || !initialName || initialName === getConversationName());
@@ -1501,7 +1472,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
       await sleep(200, signal);
     }
 
-    showProgress('📝 Extracting messages...', 30);
+    showProgress('Collecting messages…', 30);
     await sleep(100, signal);
     if (document.hidden) await waitForDocumentVisible(signal);
     ensureCurrentConversation(conversationMatches);
@@ -1585,7 +1556,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
       if (failure) throw failure.reason;
     }
 
-    showProgress('📦 Packaging...', 88);
+    showProgress('Preparing file…', 88);
     await sleep(200, signal);
     ensureCurrentConversation(conversationMatches);
     const candidate = checkpointKey && loadAll && !mediaFailed && history.reason !== 'limit' && history.reason !== 'visible-only' && history.threadsComplete !== false
@@ -1609,7 +1580,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
         return 'done';
       } else {
         exportPhase = 'failed';
-        showProgress('❌ Export failed: ' + (resp?.error || 'Unknown error'), 0, 'error');
+        showProgress('Export failed: ' + (resp?.error || 'Unknown error'), 0, 'error');
         scheduleHideProgress(6000);
         return 'error';
       }
@@ -1625,7 +1596,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     }
     console.error('[GCE] Export error:', err);
     exportPhase = 'failed';
-    showProgress('❌ Export failed: ' + err.message, 0, 'error');
+    showProgress('Export failed: ' + err.message, 0, 'error');
     scheduleHideProgress(6000);
     return 'error';
   } finally {

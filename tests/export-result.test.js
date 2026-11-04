@@ -92,6 +92,33 @@ function page(target, file, options = {}) {
 }
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: dependent settings look disabled when incremental export is on`, () => {
+    const p = page(target, 'popup.js');
+    p.element('incremental').checked = true;
+    p.context.updateIncrementalControls();
+    assert.equal(p.element('load-all').disabled, true);
+    assert.equal(p.element('date-from').disabled, true);
+    assert.equal(p.element('history-row').classList.contains('is-disabled'), true);
+    assert.equal(p.element('date-row').classList.contains('is-disabled'), true);
+
+    p.element('incremental').checked = false;
+    p.context.updateIncrementalControls();
+    assert.equal(p.element('history-row').classList.contains('is-disabled'), false);
+    assert.equal(p.element('date-row').classList.contains('is-disabled'), false);
+  });
+
+  test(`${target}: attachment control explains when it is available`, () => {
+    const p = page(target, 'popup.js');
+    p.element('format-select').value = 'md';
+    p.context.updateMediaRowVisibility();
+    assert.equal(p.element('include-media').disabled, true);
+    assert.equal(p.element('media-row').classList.contains('is-disabled'), true);
+    p.element('format-select').value = 'html';
+    p.context.updateMediaRowVisibility();
+    assert.equal(p.element('include-media').disabled, false);
+    assert.equal(p.element('media-row').classList.contains('is-disabled'), false);
+  });
+
   test(`${target}: the real progress notification follows the theme and unsubscribes when dismissed`, async () => {
     const p = page(target, 'result-host.js', { theme: 'dark' });
     p.document.querySelector = () => null;
@@ -104,6 +131,10 @@ for (const target of ['chrome', 'firefox']) {
     const root = p.document.documentElement;
     const notification = root.children[0];
     assert.equal(notification.getAttribute('data-gce-theme'), 'dark');
+    assert.equal(notification.querySelector('.gce-percent').textContent, '15%');
+    assert.equal(notification.querySelector('.gce-label').textContent, 'Collecting fixture messages');
+    assert.equal(notification.querySelector('.gce-bar-wrap').getAttribute('aria-valuenow'), '15');
+    assert.equal(notification.querySelector('.gce-close').getAttribute('aria-label'), 'Dismiss export notification');
     assert.equal(root.getAttribute('data-gce-theme'), null, 'Chat itself must retain its own theme');
     p.chrome.storage.onChanged.emit({ gceTheme: { newValue: 'light' } }, 'local');
     assert.equal(notification.getAttribute('data-gce-theme'), 'light');
@@ -120,6 +151,7 @@ for (const target of ['chrome', 'firefox']) {
     assert.equal(p.element('dark-mode').checked, true);
     p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: 'job-1', state: 'working', phase: 'media',
       text: 'Downloading media', percent: 50, startedAt: 10, revision: 1 } });
+    assert.equal(p.element('status-value').textContent, '50%');
     let stored;
     p.chrome.storage.local.set = async value => { stored = value.gceTheme; };
     p.element('dark-mode').checked = false;
@@ -140,6 +172,7 @@ for (const target of ['chrome', 'firefox']) {
     await settle();
     assert.equal(p.document.documentElement.getAttribute('data-gce-theme'), 'dark');
     assert.equal(p.element('heading').textContent, 'Export saved with warnings');
+    assert.equal(p.element('result-card').getAttribute('data-state'), 'warning');
     p.chrome.storage.onChanged.emit({ gceTheme: { newValue: 'light' } }, 'local');
     assert.equal(p.document.documentElement.getAttribute('data-gce-theme'), 'light');
     assert.equal(p.element('open').disabled, false);
@@ -159,6 +192,7 @@ for (const target of ['chrome', 'firefox']) {
     };
     await p.context.loadExportJobs();
     assert.equal(p.element('status-text').textContent, 'Waiting for Chat');
+    assert.equal(p.element('status-value').textContent, 'Paused');
     assert.equal(p.element('job-name').textContent, 'Fixture space');
     assert.equal(p.element('export-btn').disabled, true);
     assert.equal(p.element('return-to-chat').hidden, false);
