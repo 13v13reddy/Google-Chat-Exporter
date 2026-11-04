@@ -8,7 +8,7 @@ const vm = require('node:vm');
 const { installThreadFixture } = require('./helpers/thread-fixture');
 
 function loadContent(target = 'chrome') {
-  const event = { addListener() {} };
+  const event = { addListener(fn) { this.listener = fn; } };
   const selectors = {
     frameName: 'single_full_screen',
     scrollContainers: [],
@@ -500,6 +500,131 @@ test('export mode tick does not poll background when disabled', async () => {
 });
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: returning before a throttled timer fires still resets the thread render deadline`, async () => {
+    const c = loadContent(target);
+    const listeners = new Set();
+    c.document.addEventListener = (_type, fn) => listeners.add(fn);
+    c.document.removeEventListener = (_type, fn) => listeners.delete(fn);
+    const visibility = hidden => { c.document.hidden = hidden; for (const fn of [...listeners]) fn(); };
+    let release, rendered = false;
+    c.sleep = () => new Promise(resolve => { release = resolve; });
+    const waiting = c.waitForThreadCondition(() => rendered, null, 1);
+    visibility(true);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    visibility(false);
+    rendered = true;
+    release();
+    assert.equal(await waiting, true, 'elapsed hidden time must not cause a false thread failure on return');
+    assert.equal(listeners.size, 0);
+  });
+
+  test(`${target}: a hidden history wait stays pending and cancellation removes every visibility listener`, async () => {
+    const c = loadContent(target);
+    const listeners = new Set();
+    c.document.addEventListener = (_type, fn) => listeners.add(fn);
+    c.document.removeEventListener = (_type, fn) => listeners.delete(fn);
+    const visibility = hidden => { c.document.hidden = hidden; for (const fn of [...listeners]) fn(); };
+    const container = { scrollHeight: 500, querySelectorAll: () => [] };
+    let settled = false;
+    const wait = c.waitForHistoryMutation(container, 500, 0, 5).then(value => { settled = true; return value; });
+    visibility(true);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(settled, false, 'hidden time must not count as an idle history boundary');
+    container.scrollHeight = 600;
+    visibility(false);
+    assert.equal(await wait, true);
+    assert.equal(listeners.size, 0);
+    const controller = new AbortController();
+    visibility(true);
+    const cancelled = c.waitForHistoryMutation(container, 600, 0, 5, controller.signal);
+    controller.abort();
+    await assert.rejects(cancelled, { name: 'AbortError' });
+    assert.equal(listeners.size, 0);
+  });
+
+  test(`${target}: switching tabs during thread loading pauses, resumes all replies, and keeps one job through packaging`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const realThreadWait = c.waitForThreadCondition;
+    const f = installThreadFixture(c, { onOpen() { c.document.hidden = true; } });
+    const fastWait = c.waitForThreadCondition;
+    c.waitForThreadCondition = (...args) => c.document.hidden ? realThreadWait(...args) : fastWait(...args);
+    const listeners = new Set();
+    c.document.addEventListener = (_type, fn) => listeners.add(fn);
+    c.document.removeEventListener = (_type, fn) => listeners.delete(fn);
+    const statuses = [];
+    c.showProgress = (text, _percent, state) => statuses.push({ text, state });
+    let payload, handedOffJob;
+    c.chrome.runtime.sendMessage = async msg => {
+      if (msg.action === 'packageAndDownload') { payload = msg.payload; handedOffJob = msg.jobId; return { success: true, filename: 'Fixture.md' }; }
+      return {};
+    };
+    const result = c.runExport({ format: 'md' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.state.active, 'old-parent');
+    assert.equal(payload, undefined);
+    assert.ok(statuses.some(status => status.state === 'paused'));
+    let activeJob;
+    c.chrome.runtime.onMessage.listener({ action: 'getExportJob' }, {}, reply => { activeJob = reply.jobId; });
+    assert.match(activeJob, /^job-/);
+    c.document.hidden = false;
+    for (const fn of [...listeners]) fn();
+    assert.equal(await result, 'done');
+    assert.equal(handedOffJob, activeJob);
+    assert.equal(payload.messages.filter(message => message.parentMessageId === 'old-parent').length, 3);
+    assert.equal(listeners.size, 0);
+    assert.equal(f.state.active, '');
+    c.chrome.runtime.onMessage.listener({ action: 'getExportJob' }, {}, reply => assert.equal(reply.jobId, null));
+  });
+
+  test(`${target}: a paused thread export can be cancelled from the popup without saving a partial file`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const realThreadWait = c.waitForThreadCondition;
+    const f = installThreadFixture(c, { onOpen() { c.document.hidden = true; } });
+    const fastWait = c.waitForThreadCondition;
+    c.waitForThreadCondition = (...args) => c.document.hidden && args[3] !== false ? realThreadWait(...args) : fastWait(...args);
+    const listeners = new Set();
+    c.document.addEventListener = (_type, fn) => listeners.add(fn);
+    c.document.removeEventListener = (_type, fn) => listeners.delete(fn);
+    let packaged = false;
+    c.chrome.runtime.sendMessage = async msg => { if (msg.action === 'packageAndDownload') packaged = true; return {}; };
+    const result = c.runExport({ format: 'md' });
+    await new Promise(resolve => setImmediate(resolve));
+    let job;
+    const ask = msg => c.chrome.runtime.onMessage.listener(msg, {}, reply => { job = reply; });
+    ask({ action: 'getExportJob' });
+    const jobId = job.jobId;
+    ask({ action: 'cancelExportJob', jobId: 'job-unrelated' });
+    assert.equal(job.success, false);
+    ask({ action: 'cancelExportJob', jobId });
+    assert.equal(job.success, true);
+    assert.equal(await result, 'cancelled');
+    assert.equal(packaged, false);
+    assert.equal(listeners.size, 0);
+    assert.equal(f.state.active, '');
+  });
+
+  test(`${target}: a hidden Chat tab does not turn a suspended thread render into a timeout`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const listeners = new Set();
+    c.document.hidden = true;
+    c.document.addEventListener = (type, fn) => { if (type === 'visibilitychange') listeners.add(fn); };
+    c.document.removeEventListener = (_type, fn) => listeners.delete(fn);
+    c.sleep = () => new Promise(resolve => setTimeout(resolve, 1));
+    let rendered = false;
+    let settled = false;
+    const pending = c.waitForThreadCondition(() => rendered, null, 1).then(value => { settled = true; return value; });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(settled, false, 'inactive-tab time cannot exhaust the render timeout');
+    rendered = true;
+    c.document.hidden = false;
+    for (const listener of [...listeners]) listener();
+    assert.equal(await pending, true);
+    assert.equal(listeners.size, 0);
+  });
+
   test(`${target}: the date filter includes a recent reply to an older parent with labeled context`, async () => {
     const c = loadContent(target);
     await c.loadSelectors();

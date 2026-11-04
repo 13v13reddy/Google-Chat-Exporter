@@ -97,7 +97,7 @@ async function toggleExportMode() {
   try {
     const resp = await chrome.runtime.sendMessage({ action: 'setExportMode', enabled });
     $('export-mode').checked = resp?.enabled === true;
-    if (resp?.enabled) showStatus('Auto-export on: open each channel to export it.', 100, 'done');
+    if (resp?.enabled && !visibleJobId && !isExporting) showStatus('Auto-export on: open each channel to export it.', 100, 'done');
   } catch {
     $('export-mode').checked = !enabled;
   }
@@ -109,15 +109,9 @@ let isExporting = false;
 
 async function triggerExport() {
   if (isExporting) return;
-  isExporting = true;
-
-  const btn = $('export-btn');
-  btn.disabled = true;
-  btn.innerHTML = `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="animation:spin .7s linear infinite;fill:white;width:17px;height:17px;flex-shrink:0">
-      <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
-    </svg>
-    Exporting...`;
+  visibleJobId = null;
+  $('job-controls').hidden = true;
+  setExporting();
 
   showStatus('Starting export...', 2);
 
@@ -170,6 +164,18 @@ async function triggerExport() {
   }
 }
 
+function setExporting() {
+  isExporting = true;
+
+  const btn = $('export-btn');
+  btn.disabled = true;
+  btn.innerHTML = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="animation:spin .7s linear infinite;fill:white;width:17px;height:17px;flex-shrink:0">
+      <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
+    </svg>
+    Exporting...`;
+}
+
 function resetBtn() {
   isExporting = false;
   const btn = $('export-btn');
@@ -188,8 +194,8 @@ let resultDownloadId = null;
 let statusHideTimer = null;
 const dismissedResults = new Set();
 
-function hideExportResult() {
-  if (resultDownloadId !== null) dismissedResults.add(resultDownloadId);
+function hideExportResult(dismiss = false) {
+  if (dismiss && resultDownloadId !== null) dismissedResults.add(resultDownloadId);
   resultCleanup?.();
   resultCleanup = null;
   resultDownloadId = null;
@@ -203,7 +209,10 @@ function showExportResult(result) {
   hideExportResult();
   resultDownloadId = result.downloadId;
   $('export-result').hidden = false;
-  resultCleanup = mountExportResult($('export-result'), result, hideExportResult);
+  resultCleanup = mountExportResult($('export-result'), result, () => {
+    hideExportResult(true);
+    if (result.jobId) dismissExportJob(result.jobId);
+  });
 }
 
 function showStatus(text, percent, state = 'working') {
@@ -211,13 +220,14 @@ function showStatus(text, percent, state = 'working') {
   statusHideTimer = null;
   hideExportResult();
   $('status-area').classList.add('visible');
+  $('job-name').hidden = true;
   $('status-text').textContent = text;
   const bar = $('progress-bar');
   bar.style.width = percent + '%';
   bar.className = 'progress-bar' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
 
   const spinner = $('status-spinner');
-  spinner.style.display = (state === 'done' || state === 'error') ? 'none' : 'block';
+  spinner.style.display = (state === 'done' || state === 'error' || state === 'paused') ? 'none' : 'block';
 }
 
 function hideStatus() {
@@ -226,16 +236,82 @@ function hideStatus() {
   $('status-area').classList.remove('visible');
   $('progress-bar').style.width = '0%';
   $('progress-bar').className = 'progress-bar';
+  $('job-controls').hidden = true;
+}
+
+// Progress belongs to the background, so it survives closing this popup.
+const exportJobs = new Map();
+const dismissedJobs = new Set();
+let visibleJobId = null;
+const jobActive = job => job.state === 'working' || job.state === 'paused';
+
+function mergeExportJob(job) {
+  if (!job?.jobId || (exportJobs.get(job.jobId)?.revision || 0) >= job.revision) return;
+  exportJobs.set(job.jobId, job);
+}
+
+function renderExportJobs() {
+  const all = [...exportJobs.values()].sort((a, b) => b.startedAt - a.startedAt);
+  if (all.some(job => jobActive(job) && job.phase !== 'download')) setExporting();
+  else resetBtn();
+  const available = all.filter(job => !dismissedJobs.has(job.jobId) && !job.acknowledged);
+  const job = available.find(jobActive) || available[0];
+  const hadJob = visibleJobId !== null;
+  visibleJobId = job?.jobId || null;
+  if (!job) {
+    if (hadJob) { hideStatus(); hideExportResult(); }
+    return;
+  }
+  if (Number.isSafeInteger(job.downloadId)) {
+    showExportResult(job);
+    return;
+  }
+  showStatus(job.text, job.percent, job.state);
+  $('job-name').textContent = job.conversationName;
+  $('job-name').hidden = false;
+  $('job-controls').hidden = jobActive(job) && job.phase === 'packaging';
+  $('return-to-chat').hidden = !jobActive(job) || job.phase === 'packaging';
+  $('cancel-export').hidden = !jobActive(job) || job.phase === 'packaging';
+  $('dismiss-status').hidden = jobActive(job);
+}
+
+async function loadExportJobs() {
+  try {
+    const response = await chrome.runtime.sendMessage({ action: 'getExportJobs' });
+    for (const job of response?.jobs || []) mergeExportJob(job);
+    renderExportJobs();
+  } catch { /* Older background scripts still relay live progress. */ }
+}
+
+function dismissExportJob(jobId = visibleJobId) {
+  if (!jobId) return;
+  dismissedJobs.add(jobId);
+  chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId }).catch(() => {});
+  renderExportJobs();
+}
+
+async function controlExportJob(action) {
+  if (!visibleJobId) return;
+  try {
+    await chrome.runtime.sendMessage({ action, jobId: visibleJobId });
+  } catch { /* Refresh below reports a lost Chat tab. */ }
+  await loadExportJobs();
 }
 
 // ── Background message relay (progress updates from content) ─
 
 chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.action === 'exportJobUpdate') {
+    mergeExportJob(msg.job);
+    renderExportJobs();
+    return;
+  }
   if (msg.action === 'exportModeChanged') {
     $('export-mode').checked = msg.enabled === true;
     return;
   }
   if (msg.action === 'exportStateUpdate') {
+    if (msg.jobId) return; // The background publishes the persisted, canonical status.
     if (msg.state === 'done' && Number.isSafeInteger(msg.downloadId) && msg.downloadId >= 0) {
       if (dismissedResults.has(msg.downloadId)) return;
       resetBtn();
@@ -264,6 +340,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   detectConversation();
   loadExportMode();
+  loadExportJobs();
 
   $('export-btn').addEventListener('click', triggerExport);
   $('format-select').addEventListener('change', () => {
@@ -275,4 +352,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('date-from').addEventListener('change', saveSettings);
   $('incremental').addEventListener('change', () => { updateIncrementalControls(); saveSettings(); });
   $('export-mode').addEventListener('change', toggleExportMode);
+  $('return-to-chat').addEventListener('click', () => controlExportJob('focusExportJob'));
+  $('cancel-export').addEventListener('click', () => controlExportJob('cancelExportJob'));
+  $('dismiss-status').addEventListener('click', () => dismissExportJob());
 });

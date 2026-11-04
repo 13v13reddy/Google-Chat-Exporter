@@ -6,9 +6,10 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadBackground(target = 'chrome', withZip = false) {
-  const event = () => ({ addListener(fn) { this.listener = fn; } });
-  const stored = {};
+function loadBackground(target = 'chrome', withZip = false, initialStorage = {}) {
+  const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); },
+    listener(...args) { for (const fn of this.listeners) fn(...args); } });
+  const stored = structuredClone(initialStorage);
   const session = {};
   const chrome = {
     action: {
@@ -18,7 +19,8 @@ function loadBackground(target = 'chrome', withZip = false) {
     },
     runtime: { onInstalled: event(), onMessage: { addListener(fn) { this.listener = fn; } }, async sendMessage() {}, lastError: null },
     contextMenus: { removeAll(callback) { callback(); }, create() {}, onClicked: event() },
-    tabs: { async query() { return []; }, async sendMessage() {} },
+    tabs: { async query() { return []; }, async get(id) { return { id }; },
+      async sendMessage() {}, onRemoved: event(), onUpdated: event() },
     scripting: { async executeScript() {} },
     storage: { local: {
       async get(key) { return key ? { [key]: stored[key] } : { ...stored }; },
@@ -30,7 +32,7 @@ function loadBackground(target = 'chrome', withZip = false) {
     } },
     downloads: { download(_options, callback) { callback(1); },
       async search() { return [{ state: 'complete' }]; },
-      onChanged: { addListener(fn) { this.listener = fn; } }
+      onChanged: event()
     }
   };
   const context = vm.createContext({
@@ -55,6 +57,7 @@ function loadBackground(target = 'chrome', withZip = false) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, 'lib', 'jszip.min.js'), 'utf8'), context);
   }
   const filename = path.join(__dirname, '..', target, 'background.js');
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, 'export-jobs.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   return context;
 }
@@ -194,6 +197,193 @@ test('triggerDownload converts data URLs to blob URLs in Firefox', async () => {
 });
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: export progress can be recovered after the toolbar popup closes`, async () => {
+    const c = loadBackground(target);
+    const sender = { tab: { id: 7, url: 'https://chat.google.com/app/chat/ROOM' }, frameId: 0 };
+    c.chrome.runtime.onMessage.listener({ action: 'exportStateUpdate', jobId: 'job-1', state: 'working',
+      text: 'Downloading media 2/4...', percent: 60 }, sender, () => {});
+    await new Promise(resolve => setImmediate(resolve));
+    const saved = (await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs;
+    assert.ok(saved?.['job-1'], 'background state survives losing the popup message listener');
+    assert.equal(saved['job-1'].state, 'working');
+    assert.equal(saved['job-1'].tabId, 7);
+    assert.equal(saved['job-1'].text, 'Downloading media 2/4...');
+  });
+
+  test(`${target}: persisted jobs resume status in a new worker and target their original tab and frame`, async () => {
+    let c = loadBackground(target);
+    const sender = { tab: { id: 7 }, frameId: 2 };
+    const ask = (msg, source = {}) => new Promise(resolve => c.chrome.runtime.onMessage.listener(msg, source, resolve));
+    await ask({ action: 'exportStateUpdate', jobId: 'job-1', state: 'paused', phase: 'history',
+      text: 'Waiting for Chat', percent: 15, conversationName: 'Fixture space' }, sender);
+    const persisted = await c.chrome.storage.local.get('gceExportJobs');
+    c = loadBackground(target, false, persisted);
+    const calls = [];
+    c.chrome.tabs.sendMessage = async (id, msg, options) => {
+      calls.push({ id, msg, options });
+      return msg.action === 'getExportJob' ? { jobId: 'job-1', state: 'paused', phase: 'history' } : { success: true };
+    };
+    c.chrome.tabs.update = async (id, update) => { calls.push({ id, update }); return { windowId: 3 }; };
+    c.chrome.windows = { async update(id, update) { calls.push({ windowId: id, update }); } };
+    const recovered = (await ask({ action: 'getExportJobs' })).jobs[0];
+    assert.equal(recovered.state, 'paused');
+    assert.equal(recovered.conversationName, 'Fixture space');
+    assert.equal(c.chrome.action.badge, 'WAIT');
+    assert.equal((await ask({ action: 'focusExportJob', jobId: 'job-1' })).success, true);
+    assert.ok(calls.some(call => call.id === 7 && call.update?.active === true));
+    assert.ok(calls.some(call => call.windowId === 3 && call.update?.focused === true));
+    assert.equal((await ask({ action: 'cancelExportJob', jobId: 'job-1' })).success, true);
+    const cancel = calls.find(call => call.msg?.action === 'cancelExportJob');
+    assert.equal(cancel.id, 7);
+    assert.equal(cancel.options.frameId, 2, 'Gmail iframe jobs cannot be cancelled in another frame');
+    await ask({ action: 'setExportMode', enabled: true });
+    assert.equal(c.chrome.action.badge, 'WAIT', 'AUTO cannot hide a paused export');
+    await ask({ action: 'exportStateUpdate', jobId: 'job-1', state: 'working', phase: 'media', text: 'Downloading media', percent: 50 }, sender);
+    assert.equal(c.chrome.action.badge, 'RUN');
+    await ask({ action: 'exportStateUpdate', jobId: 'job-1', state: 'error', text: 'Forged', phase: 'failed' }, { tab: { id: 8 }, frameId: 2 });
+    assert.equal((await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs['job-1'].state, 'working');
+  });
+
+  test(`${target}: closing or reloading the source reports interruption without treating tab activation as failure`, async () => {
+    const c = loadBackground(target);
+    const sender = { tab: { id: 7 }, frameId: 0 };
+    const ask = (msg, source = {}) => new Promise(resolve => c.chrome.runtime.onMessage.listener(msg, source, resolve));
+    const update = { action: 'exportStateUpdate', jobId: 'job-1', state: 'working', phase: 'history', text: 'Loading', percent: 15 };
+    await ask(update, sender);
+    c.chrome.tabs.onUpdated.listener(7, { status: 'complete', active: false });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs['job-1'].state, 'working');
+    c.chrome.tabs.onUpdated.listener(7, { status: 'loading' });
+    await new Promise(resolve => setImmediate(resolve));
+    let job = (await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs['job-1'];
+    assert.equal(job.phase, 'interrupted');
+    assert.match(job.text, /closed, reloaded, or discarded/);
+    assert.equal(c.chrome.action.badge, 'ERR');
+    await ask(update, sender);
+    assert.equal((await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs['job-1'].phase, 'interrupted', 'late renderer messages cannot resurrect a stopped job');
+    await ask({ action: 'acknowledgeExportJob', jobId: 'job-1' });
+    assert.equal(c.chrome.action.badge, '');
+    job = (await ask({ action: 'getExportJobs' })).jobs[0];
+    assert.equal(job.acknowledged, true);
+    await ask({ ...update, jobId: 'job-2' }, sender);
+    c.chrome.tabs.onRemoved.listener(7);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await c.chrome.storage.local.get('gceExportJobs')).gceExportJobs['job-2'].phase, 'interrupted');
+  });
+
+  test(`${target}: packaging and native downloads continue after Chat closes, and success waits for the file`, async () => {
+    const c = loadBackground(target);
+    const sender = { tab: { id: 7 }, frameId: 0 };
+    const ask = (msg, source = {}) => new Promise(resolve => c.chrome.runtime.onMessage.listener(msg, source, resolve));
+    await ask({ action: 'exportStateUpdate', jobId: 'job-1', state: 'working', phase: 'media', text: 'Collected messages', percent: 85 }, sender);
+    let enter, finish;
+    const entered = new Promise(resolve => { enter = resolve; });
+    const packaged = new Promise(resolve => { finish = resolve; });
+    c.packageMarkdown = async () => { enter(); return packaged; };
+    let state = 'in_progress';
+    c.chrome.downloads.search = async () => [{ state }];
+    const response = ask({ action: 'packageAndDownload', jobId: 'job-1', format: 'md', payload: { history: { warning: 'Fixture warning' } } }, sender);
+    await entered;
+    c.chrome.tabs.onRemoved.listener(7);
+    c.chrome.tabs.get = async () => { throw new Error('No tab'); };
+    assert.equal((await ask({ action: 'getExportJobs' })).jobs[0].phase, 'packaging');
+    finish({ downloadId: 42, filename: 'Fixture.md' });
+    assert.equal((await response).success, true);
+    let job = (await ask({ action: 'getExportJobs' })).jobs[0];
+    assert.equal(job.phase, 'download');
+    assert.equal(job.state, 'working', 'initiating a save is not completed success');
+    assert.equal(job.warning, 'Fixture warning');
+    assert.equal(c.chrome.action.badge, 'SAVE');
+    assert.equal((await ask({ action: 'cancelExportJob', jobId: 'job-1' })).success, false);
+    state = 'complete';
+    c.chrome.downloads.onChanged.listener({ id: 42, state: { current: state } });
+    job = (await ask({ action: 'getExportJobs' })).jobs[0];
+    assert.equal(job.state, 'done');
+    assert.equal(job.phase, 'complete');
+    assert.equal(c.chrome.action.badge, 'DONE');
+    await ask({ action: 'exportStateUpdate', jobId: 'job-1', state: 'working', phase: 'media', text: 'Stale renderer' }, sender);
+    assert.equal((await ask({ action: 'getExportJobs' })).jobs[0].state, 'done');
+  });
+
+  test(`${target}: packaging survives idle periods and releases worker activity after success or failure`, async () => {
+    const c = loadBackground(target);
+    const intervals = new Map();
+    let now = 0, lastActivity = 0, nextId = 0;
+    c.setInterval = (fn, period) => { const id = ++nextId; intervals.set(id, { fn, period, next: now + period }); return id; };
+    c.clearInterval = id => intervals.delete(id);
+    const get = c.chrome.storage.local.get;
+    c.chrome.storage.local.get = async key => { lastActivity = now; return get(key); };
+    const advance = async targetTime => {
+      while (true) {
+        const timer = [...intervals.values()].sort((a, b) => a.next - b.next)[0];
+        if (!timer || timer.next > targetTime) break;
+        now = timer.next;
+        assert.ok(now - lastActivity < 30000, 'the worker must receive extension API activity before its idle deadline');
+        timer.next += timer.period;
+        timer.fn();
+        await Promise.resolve();
+      }
+      now = targetTime;
+      assert.ok(now - lastActivity < 30000, 'packaging must remain alive while its archive is still being generated');
+    };
+    const ask = msg => new Promise(resolve => c.chrome.runtime.onMessage.listener(msg, {}, resolve));
+    let entered, finish;
+    const started = new Promise(resolve => { entered = resolve; });
+    const pending = new Promise(resolve => { finish = resolve; });
+    c.packageMarkdown = async () => { entered(); return pending; };
+    const saving = ask({ action: 'packageAndDownload', format: 'md', payload: {} });
+    await started;
+    await advance(65000);
+    finish({ downloadId: 42, filename: 'Fixture.md' });
+    assert.equal((await saving).success, true);
+    assert.equal(intervals.size, 0, 'completed exports must allow the worker to become idle');
+    c.console = { ...console, error() {} };
+    c.packageMarkdown = async () => { throw new Error('Fixture packaging failure'); };
+    assert.equal((await ask({ action: 'packageAndDownload', format: 'md', payload: {} })).success, false);
+    assert.equal(intervals.size, 0, 'failed exports must release their heartbeat too');
+  });
+
+  test(`${target}: a new worker recovers completed downloads and reports lost extraction or packaging`, async () => {
+    const jobs = Object.fromEntries(['history', 'packaging', 'download'].map((phase, index) => {
+      const jobId = `job-${index}`;
+      return [jobId, { jobId, tabId: 7, frameId: 0, state: 'working', phase, text: 'Working',
+        startedAt: index, updatedAt: index, revision: 1, ...(phase === 'download' ? { downloadId: 42, filename: 'Fixture.md' } : {}) }];
+    }));
+    const c = loadBackground(target, false, { gceExportJobs: jobs });
+    const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'getExportJobs' }, {}, resolve));
+    assert.equal(response.jobs.find(job => job.phase === 'complete').downloadId, 42);
+    assert.equal(response.jobs.filter(job => job.phase === 'interrupted').length, 2);
+    assert.ok(response.jobs.every(job => job.state !== 'working'));
+  });
+
+  test(`${target}: interrupted saves remain failed without advancing the checkpoint or losing dismissal`, async () => {
+    const c = loadBackground(target);
+    const sender = { tab: { id: 7 }, frameId: 0 };
+    const ask = (msg, source = {}) => new Promise(resolve => c.chrome.runtime.onMessage.listener(msg, source, resolve));
+    await ask({ action: 'exportStateUpdate', jobId: 'job-1', state: 'working', phase: 'history' }, sender);
+    let state = 'in_progress';
+    c.chrome.downloads.search = async () => [{ state }];
+    const key = 'gceCheckpoint:' + 'a'.repeat(64);
+    const payload = { conversationName: 'Fixture', messages: [], exportDate: '2026-11-03T12:00:00Z',
+      checkpoint: { key, value: { timestamp: 100, fingerprints: [] } } };
+    await ask({ action: 'packageAndDownload', jobId: 'job-1', format: 'txt', payload }, sender);
+    await ask({ action: 'acknowledgeExportJob', jobId: 'job-1' });
+    state = 'interrupted';
+    c.chrome.downloads.onChanged.listener({ id: 1, state: { current: state } });
+    const job = (await ask({ action: 'getExportJobs' })).jobs[0];
+    await vm.runInContext('checkpointQueue', c);
+    assert.equal(job.state, 'error');
+    assert.equal(job.phase, 'interrupted');
+    assert.equal(job.acknowledged, true, 'closing a save card also dismisses its later download events');
+    assert.equal((await c.chrome.storage.local.get(key))[key], undefined);
+    assert.equal(c.chrome.action.badge, '');
+    state = 'complete';
+    c.chrome.downloads.onChanged.listener({ id: 1, state: { current: state } });
+    const resumed = (await ask({ action: 'getExportJobs' })).jobs[0];
+    assert.equal(resumed.state, 'done', 'resuming the native download must replace its interrupted status');
+    assert.equal(resumed.acknowledged, true);
+  });
+
   test(`${target}: all download formats preserve UTF-8 and HTML ZIPs contain real bundled attachments`, async () => {
     const c = loadBackground(target, true);
     if (target === 'firefox') c.navigator.userAgent = 'Mozilla/5.0 Firefox/140.0';

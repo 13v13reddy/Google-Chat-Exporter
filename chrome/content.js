@@ -93,8 +93,15 @@ let exportController = null;
 let progressCleanup = null;
 let progressIsResult = false;
 let progressHideTimer = null;
+let progressJobId = null;
+let exportJobId = null;
+let exportPhase = 'idle';
+let exportName = '';
+let lastExportProgress = { text: '', percent: 0, state: 'working' };
 
 function showProgress(text, percent, state = 'working') {
+  lastExportProgress = { text, percent, state };
+  progressJobId = exportJobId;
   if (progressIsResult) hideProgress();
   clearTimeout(progressHideTimer);
   progressHideTimer = null;
@@ -142,6 +149,7 @@ function showProgress(text, percent, state = 'working') {
       }
       .gce-spinner.done { border-color: #34a853; border-top-color: #34a853; animation: none; }
       .gce-spinner.error { border-color: #ea4335; border-top-color: #ea4335; animation: none; }
+      .gce-spinner.paused { animation: none; border-color: #80868b; }
       @keyframes gce-spin { to { transform: rotate(360deg); } }
       .gce-label {
         font-size: 13px;
@@ -213,6 +221,9 @@ function showProgress(text, percent, state = 'working') {
         showProgress('Cancelling export...', 0);
         exportController.abort();
       } else {
+        if (progressJobId && !exportInProgress) {
+          chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId: progressJobId }).catch(() => {});
+        }
         hideProgress();
       }
     });
@@ -222,18 +233,19 @@ function showProgress(text, percent, state = 'working') {
   const bar = progressEl.querySelector('.gce-bar');
   const spinner = progressEl.querySelector('.gce-spinner');
 
-  if (label) label.textContent = text;
+  if (label) { label.textContent = text; label.title = text; }
   if (bar) {
     bar.style.width = percent + '%';
     bar.className = 'gce-bar' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
   }
   if (spinner) {
-    spinner.className = 'gce-spinner' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
+    spinner.className = 'gce-spinner' + (state === 'done' ? ' done' : state === 'error' ? ' error' : state === 'paused' ? ' paused' : '');
   }
 
   // Relay to background for popup display
   try {
-    chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent, state });
+    chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent, state,
+      jobId: exportJobId, phase: exportPhase, conversationName: exportName }).catch(() => {});
   } catch { /* service worker may be inactive */ }
 }
 
@@ -250,6 +262,7 @@ function hideProgress() {
 }
 
 function scheduleHideProgress(delay) {
+  if (exportJobId) return; // Keep a tracked terminal outcome until dismissed.
   clearTimeout(progressHideTimer);
   progressHideTimer = setTimeout(hideProgress, delay);
 }
@@ -265,10 +278,40 @@ function showExportResult(result, warning = '', auto = false) {
   progressEl.id = 'gce-progress';
   progressEl.style.cssText = 'position:fixed;bottom:20px;right:20px;width:min(328px,calc(100vw - 32px));z-index:2147483647;';
   progressIsResult = true;
-  progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, hideProgress);
+  const jobId = exportJobId;
+  progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, () => {
+    if (jobId) chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId }).catch(() => {});
+    hideProgress();
+  });
   document.documentElement.appendChild(progressEl);
   chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent: 100, state: 'done',
+    jobId: exportJobId, phase: 'download', conversationName: exportName,
     downloadId: result.downloadId, filename: result.filename, warning, auto }).catch(() => {});
+}
+
+function waitForDocumentVisible(signal = null) {
+  throwIfAborted(signal);
+  if (!document.hidden) return Promise.resolve(false);
+  const job = exportJobId;
+  const previous = lastExportProgress;
+  if (job) showProgress('Paused — return to Chat to resume.', previous.percent, 'paused');
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      document.removeEventListener('visibilitychange', visible);
+      signal?.removeEventListener('abort', cancel);
+    };
+    const visible = () => {
+      if (document.hidden) return;
+      cleanup();
+      if (job && exportJobId === job) showProgress(previous.text || 'Resuming export...', previous.percent, 'working');
+      resolve(true);
+    };
+    const cancel = () => { cleanup(); reject(createAbortError()); };
+    document.addEventListener('visibilitychange', visible);
+    signal?.addEventListener('abort', cancel, { once: true });
+    if (signal?.aborted) cancel();
+    else visible();
+  });
 }
 
 // ── Scroll to Load All Messages ─────────────────────────────
@@ -312,6 +355,7 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null, isCurr
 
   const dedupMap = new Map();
   const collectCurrent = async () => {
+    if (document.hidden) await waitForDocumentVisible(signal);
     ensureCurrentConversation(isCurrent);
     for (const msg of [...extractMessages(extractionCache, container), ...await threads.collect()]) {
       const key = msg._dedupKey || `${msg.sender}|${msg.absoluteTimestamp}|${(msg.text || '').slice(0, 80)}`;
@@ -332,6 +376,7 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null, isCurr
 
     while (batches < MAX_BATCHES) {
       throwIfAborted(signal);
+      if (document.hidden) await waitForDocumentVisible(signal);
       ensureCurrentConversation(isCurrent);
       batches++;
 
@@ -409,15 +454,27 @@ function findThreadView(topic = '') {
   ) || null;
 }
 
-async function waitForThreadCondition(read, signal = null, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  do {
-    throwIfAborted(signal);
-    const value = read();
-    if (value) return value;
-    await sleep(100, signal);
-  } while (Date.now() < deadline);
-  return null;
+async function waitForThreadCondition(read, signal = null, timeoutMs = 5000, requireVisible = true) {
+  let deadline = Date.now() + timeoutMs;
+  let wasHidden = document.hidden;
+  const visibilityChanged = () => { if (document.hidden) wasHidden = true; };
+  if (requireVisible) document.addEventListener?.('visibilitychange', visibilityChanged);
+  try {
+    do {
+      if (requireVisible && (wasHidden || document.hidden)) {
+        if (document.hidden) await waitForDocumentVisible(signal);
+        wasHidden = false;
+        deadline = Date.now() + timeoutMs;
+      }
+      throwIfAborted(signal);
+      const value = read();
+      if (value) return value;
+      await sleep(100, signal);
+    } while ((requireVisible && (wasHidden || document.hidden)) || Date.now() < deadline);
+    return null;
+  } finally {
+    if (requireVisible) document.removeEventListener?.('visibilitychange', visibilityChanged);
+  }
 }
 
 function threadSignature(view) {
@@ -446,6 +503,7 @@ async function readThreadMessages(view, topic, expectedReplies, signal, isCurren
       let idle = 0;
       for (let step = 0; step < 1000; step++) {
         throwIfAborted(signal);
+        if (document.hidden) await waitForDocumentVisible(signal);
         if (!view.isConnected || threadTopic(view) !== topic) throw new Error('Thread changed during export');
         collect();
         const before = threadSignature(view);
@@ -494,6 +552,7 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
     get scanned() { return visited.size; },
     async collect() {
       if (!SEL.threadOpen) return [];
+      if (document.hidden) await waitForDocumentVisible(signal);
       const messages = [];
       const anchor = captureScrollAnchor(main);
       const distance = Math.max(0, main.scrollHeight - main.clientHeight - main.scrollTop);
@@ -503,6 +562,7 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
           const open = group.querySelector(SEL.threadOpen);
           if (!topic || !open || visited.has(topic) || !group.isConnected) continue;
           throwIfAborted(signal);
+          if (document.hidden) await waitForDocumentVisible(signal);
           ensureCurrentConversation(isCurrent);
           visited.add(topic);
           // Do not mistake a localized/abbreviated count (e.g. 1.234 or 1K)
@@ -531,7 +591,7 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
     async restore() {
       if (!lastOpened || (isCurrent && !isCurrent()) || (initialUrl && !isSameConversationUrl(initialUrl, location.href))) return;
       // Leave a thread the user opened during the scan alone.
-      const view = await waitForThreadCondition(() => findThreadView(), null, 500);
+      const view = await waitForThreadCondition(() => findThreadView(), null, 500, false);
       if (!view || threadTopic(view) !== lastOpened) return;
       if (previousTopic) {
         if (threadTopic(view) !== previousTopic) {
@@ -540,7 +600,7 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
           if (!open) return;
           open.click();
         }
-        const restored = await waitForThreadCondition(() => findThreadView(previousTopic), null, 1000);
+        const restored = await waitForThreadCondition(() => findThreadView(previousTopic), null, 1000, false);
         if (restored) restored.scrollTop = previousTop;
       } else {
         view.closest(SEL.threadPanel)?.querySelector(SEL.threadClose)?.click();
@@ -577,7 +637,8 @@ function restoreScrollPosition(container, distanceFromBottom, anchor = null) {
   }
 }
 
-function waitForHistoryMutation(container, initialHeight, initialOldest, timeoutMs, signal = null, renderedStep = false) {
+async function waitForHistoryMutation(container, initialHeight, initialOldest, timeoutMs, signal = null, renderedStep = false) {
+  if (document.hidden) await waitForDocumentVisible(signal);
   return new Promise((resolve, reject) => {
     let settled = false;
     let settleTimer = 0;
@@ -589,6 +650,7 @@ function waitForHistoryMutation(container, initialHeight, initialOldest, timeout
       clearTimeout(settleTimer);
       clearTimeout(timeoutTimer);
       signal?.removeEventListener('abort', cancel);
+      document.removeEventListener?.('visibilitychange', visibilityChanged);
       if (frame !== null) cancelAnimationFrame(frame);
     };
 
@@ -596,6 +658,13 @@ function waitForHistoryMutation(container, initialHeight, initialOldest, timeout
       if (settled) return;
       settled = true;
       cleanup();
+      if (document.hidden) {
+        waitForDocumentVisible(signal).then(() => {
+          if (typeof Event === 'function') container.dispatchEvent?.(new Event('scroll'));
+          return waitForHistoryMutation(container, initialHeight, initialOldest, timeoutMs, signal, renderedStep);
+        }).then(resolve, reject);
+        return;
+      }
       resolve(container.scrollHeight !== initialHeight || getOldestTimestamp(container) !== initialOldest);
     };
 
@@ -613,10 +682,12 @@ function waitForHistoryMutation(container, initialHeight, initialOldest, timeout
       clearTimeout(settleTimer);
       settleTimer = setTimeout(finish, 120);
     });
+    const visibilityChanged = () => { if (document.hidden) finish(); };
     observer.observe(container, { childList: true, subtree: true });
+    document.addEventListener?.('visibilitychange', visibilityChanged);
     timeoutTimer = setTimeout(finish, timeoutMs);
     // Two paints let scroll handlers render an already-loaded viewport.
-    // Hidden tabs retain the timer fallback. History-boundary waits stay long.
+    // Hidden waits restart on return; a timer never certifies hidden history.
     if (renderedStep && typeof requestAnimationFrame === 'function') {
       frame = requestAnimationFrame(() => {
         frame = requestAnimationFrame(() => {
@@ -1338,14 +1409,18 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
       return 'error';
     }
 
-    showProgress('⏳ Preparing export...', 2);
-
     const initialUrl = typeof location !== 'undefined' ? location.href : '';
     const initialPageScope = checkpointScopeFromPage(format, includeMedia);
     const initialName = getConversationName();
+    exportJobId = `job-${crypto.randomUUID()}`;
+    exportPhase = 'history';
+    exportName = initialName || 'Google Chat';
+    showProgress('⏳ Preparing export...', 2);
     conversationMatches = () => (!initialUrl || isSameConversationUrl(initialUrl, location.href)) &&
       (!initialPageScope || initialPageScope === checkpointScopeFromPage(format, includeMedia)) &&
       (!!initialPageScope || !initialName || initialName === getConversationName());
+    if (document.hidden) await waitForDocumentVisible(signal);
+    ensureCurrentConversation(conversationMatches);
     let scope = initialPageScope || checkpointScopeFromPage(format, includeMedia, sourceUrl);
     // Old checkpoints covered only the main timeline. Establish a fresh baseline
     // before claiming any previously hidden thread replies were exported.
@@ -1382,6 +1457,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
 
     showProgress('📝 Extracting messages...', 30);
     await sleep(100, signal);
+    if (document.hidden) await waitForDocumentVisible(signal);
     ensureCurrentConversation(conversationMatches);
 
     if (!messages) messages = extractMessages();
@@ -1403,10 +1479,12 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
 
     if (!messages || messages.length === 0) {
       if (loadAll && (history.threadsComplete === false || ['limit', 'visible-only'].includes(history.reason))) {
+        exportPhase = 'failed';
         showProgress(`History scan was incomplete. No export was saved. ${history.warning || 'Please retry.'}`, 0, 'error');
         scheduleHideProgress(6000);
         return 'error';
       }
+      exportPhase = 'empty';
       showProgress(previous ? `No new messages found since the previous export. ${history.warning || ''}` : 'No messages found. Try opening a conversation first.', 100, previous ? 'done' : 'error');
       scheduleHideProgress(5000);
       exportInProgress = false;
@@ -1419,6 +1497,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     const exportDate = new Date().toISOString();
     let mediaFiles = [];
     let mediaFailed = false;
+    exportPhase = 'media';
 
     if (format === 'html' && includeMedia) {
       // Download all media
@@ -1429,6 +1508,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
       messages.forEach(msg => (msg.media || []).forEach(m => {
         if (m.url) jobs.push({ m, number: jobs.length + 1 });
       }));
+      if (jobs.length) showProgress(`Downloading media 0/${totalMedia}...`, 35);
       let nextJob = 0;
       let completed = 0;
 
@@ -1468,17 +1548,21 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     if (incremental && !candidate && !mediaFailed && !history.warning) history.warning = 'No safe checkpoint was saved; the next export may repeat messages.';
     // Packaging runs in the service worker and cannot be interrupted safely.
     exportController = null;
+    exportPhase = 'packaging';
 
     // Send to background for packaging & download
     const resp = await chrome.runtime.sendMessage({
       action: 'packageAndDownload',
+      jobId: exportJobId,
       format,
       payload: { conversationName, messages, mediaFiles, exportDate, sourceUrl, history: { reason: history.reason, warning: history.warning, since: history.since, threadsScanned: history.threadsScanned, threadsComplete: history.threadsComplete }, checkpoint: candidate ? { key: checkpointKey, value: candidate } : null }
     });
       if (resp && resp.success) {
+        exportPhase = 'download';
         showExportResult(resp, [history.warning, resp.checkpointWarning].filter(Boolean).join(' '), auto);
         return 'done';
       } else {
+        exportPhase = 'failed';
         showProgress('❌ Export failed: ' + (resp?.error || 'Unknown error'), 0, 'error');
         scheduleHideProgress(6000);
         return 'error';
@@ -1488,11 +1572,13 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     exportInProgress = false;
     exportController = null;
     if (err?.name === 'AbortError') {
+      exportPhase = 'cancelled';
       showProgress('Export cancelled.', 0, 'error');
       scheduleHideProgress(2500);
       return 'cancelled';
     }
     console.error('[GCE] Export error:', err);
+    exportPhase = 'failed';
     showProgress('❌ Export failed: ' + err.message, 0, 'error');
     scheduleHideProgress(6000);
     return 'error';
@@ -1500,6 +1586,8 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     if (originalPosition && conversationMatches()) restoreScrollPosition(originalPosition.container, originalPosition.distance, originalPosition.anchor);
     exportInProgress = false;
     exportController = null;
+    exportJobId = null;
+    exportPhase = 'idle';
   }
 }
 
@@ -1602,6 +1690,16 @@ function exportModeTick() {
 // ── Message Listener ─────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'getExportJob') {
+    sendResponse({ jobId: exportInProgress ? exportJobId : null, phase: exportPhase, ...lastExportProgress });
+    return false;
+  }
+  if (msg.action === 'cancelExportJob') {
+    const canCancel = msg.jobId === exportJobId && !!exportController;
+    if (canCancel) exportController.abort();
+    sendResponse({ success: canCancel });
+    return false;
+  }
   if (msg.action === 'ping') {
     sendResponse({ alive: true, inChatFrame: isInChatFrame() });
     return false;

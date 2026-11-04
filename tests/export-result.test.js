@@ -77,13 +77,93 @@ function page(target, file, options = {}) {
     ResizeObserver: class { observe() {} disconnect() {} }
   });
   const load = name => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, name), 'utf8'), context, { filename: `${target}/${name}` });
-  if (file === 'popup.js') load('result-host.js');
+  if (file === 'popup.js') { element('export-result').hidden = true; load('result-host.js'); }
   load(file);
   return { context, load, document, window, chrome, element, elements, posted, opened, searches, timers, changed, erased, incoming, origin,
     setItem(value) { item = value; }, getItem() { return item; } };
 }
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: reopening the popup restores a paused export and controls its original job`, async () => {
+    const p = page(target, 'popup.js');
+    const calls = [];
+    let job = { jobId: 'job-1', state: 'paused', phase: 'history', text: 'Waiting for Chat', percent: 15,
+      conversationName: 'Fixture space', startedAt: 10, revision: 1 };
+    p.chrome.runtime.sendMessage = async msg => {
+      calls.push(msg);
+      if (msg.action === 'getExportJobs') return { jobs: [job] };
+      return { success: true };
+    };
+    await p.context.loadExportJobs();
+    assert.equal(p.element('status-text').textContent, 'Waiting for Chat');
+    assert.equal(p.element('job-name').textContent, 'Fixture space');
+    assert.equal(p.element('export-btn').disabled, true);
+    assert.equal(p.element('return-to-chat').hidden, false);
+    assert.equal(p.element('cancel-export').hidden, false);
+    assert.equal(p.element('dismiss-status').hidden, true);
+    assert.equal(p.element('status-spinner').style.display, 'none');
+    assert.equal(p.timers.size, 0, 'a paused export never disappears on a timer');
+    await p.context.controlExportJob('focusExportJob');
+    assert.ok(calls.some(msg => msg.action === 'focusExportJob' && msg.jobId === 'job-1'));
+    job = { ...job, state: 'error', phase: 'cancelled', text: 'Export cancelled.', revision: 2 };
+    await p.context.controlExportJob('cancelExportJob');
+    assert.ok(calls.some(msg => msg.action === 'cancelExportJob' && msg.jobId === 'job-1'));
+    assert.equal(p.element('status-text').textContent, 'Export cancelled.');
+    assert.equal(p.element('export-btn').disabled, false);
+    assert.equal(p.element('dismiss-status').hidden, false);
+    assert.equal(p.timers.size, 0, 'terminal failures remain readable until dismissed');
+    p.context.dismissExportJob();
+    assert.ok(calls.some(msg => msg.action === 'acknowledgeExportJob' && msg.jobId === 'job-1'));
+    assert.equal(p.element('status-area').classList.contains('visible'), false);
+  });
+
+  test(`${target}: stale hydration and an older completion cannot replace a running export`, async () => {
+    const p = page(target, 'popup.js');
+    let reply;
+    p.chrome.runtime.sendMessage = () => new Promise(resolve => { reply = resolve; });
+    const loading = p.context.loadExportJobs();
+    const running = { jobId: 'job-2', state: 'working', phase: 'media', text: 'Downloading media', percent: 50, startedAt: 20, revision: 3 };
+    p.incoming.emit({ action: 'exportJobUpdate', job: running });
+    reply({ jobs: [{ ...running, state: 'done', text: 'Stale snapshot', revision: 2 }] });
+    await loading;
+    p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: 'job-1', state: 'done', phase: 'complete',
+      text: 'Older export saved', downloadId: 41, filename: 'Older.md', startedAt: 10, revision: 5 } });
+    assert.equal(p.element('status-text').textContent, 'Downloading media');
+    assert.equal(p.element('export-btn').disabled, true);
+    assert.equal(p.element('export-result').hidden, true);
+    p.incoming.emit({ action: 'exportStateUpdate', jobId: 'job-2', state: 'done', filename: 'Premature.md', downloadId: 42 });
+    assert.equal(p.element('export-btn').disabled, true, 'raw content relays cannot bypass the background download state');
+    assert.equal(p.element('export-result').hidden, true);
+  });
+
+  test(`${target}: saving and saved results survive reopening, and dismissal does not lose an older file`, async () => {
+    const p = page(target, 'popup.js');
+    const calls = [];
+    const first = { jobId: 'job-1', state: 'working', phase: 'download', text: 'Saving export', downloadId: 41,
+      filename: 'First.md', percent: 95, startedAt: 10, revision: 1 };
+    p.chrome.runtime.sendMessage = async msg => { calls.push(msg); return { jobs: [first] }; };
+    await p.context.loadExportJobs();
+    let host = p.element('export-result');
+    assert.equal(host.hidden, false);
+    assert.ok(host.children[0].src.includes('id=41'));
+    assert.equal(p.element('export-btn').disabled, false, 'a native save does not block another export');
+    const second = { jobId: 'job-2', state: 'working', phase: 'history', text: 'Loading next conversation', percent: 15, startedAt: 20, revision: 1 };
+    p.incoming.emit({ action: 'exportJobUpdate', job: second });
+    p.incoming.emit({ action: 'exportJobUpdate', job: { ...first, state: 'done', phase: 'complete', revision: 2 } });
+    p.incoming.emit({ action: 'exportJobUpdate', job: { ...second, state: 'done', phase: 'complete', downloadId: 42, filename: 'Second.md', revision: 2 } });
+    const frame = host.children[0];
+    assert.ok(frame.src.includes('id=42'));
+    p.window.emit('message', { source: frame.contentWindow, origin: p.origin, data: resultMessage(frame, 'gce:close-result') });
+    assert.ok(calls.some(msg => msg.action === 'acknowledgeExportJob' && msg.jobId === 'job-2'));
+    assert.equal(host.hidden, false);
+    assert.ok(host.children[0].src.includes('id=41'), 'the earlier file remains available after dismissing the latest one');
+    const reopened = page(target, 'popup.js');
+    reopened.chrome.runtime.sendMessage = async () => ({ jobs: [{ ...first, acknowledged: true }, { ...second, acknowledged: true }] });
+    await reopened.context.loadExportJobs();
+    assert.equal(reopened.element('status-area').classList.contains('visible'), false);
+    assert.equal(reopened.element('export-result').hidden, true, 'acknowledged results stay dismissed after reopening');
+  });
+
   test(`${target}: Open is a direct user click on the exact completed export`, async () => {
     const p = page(target, 'export-result.js');
     await settle();

@@ -93,6 +93,16 @@ Install directly from your browser's official store:
 4. The animated status HUD will appear in the bottom-right corner as it scrolls history, extracts messages, and bundles media.
 5. Your export file (`.txt`, `.md`, or `.zip`) will download automatically to your Downloads folder.
 
+### Switching tabs during an export
+
+Closing the toolbar popup does not cancel the export. Reopen the extension from any tab to see its latest status, return to the source Chat tab, or cancel while messages or media are being collected. The toolbar badge shows `RUN`, `WAIT`, `SAVE`, `DONE`, or `ERR`. Results and errors remain until dismissed with ×; a saved file keeps its **Open** button.
+
+History and thread loading depend on Google Chat rendering its page. Switching away pauses that stage safely and returning resumes it; time spent hidden does not count toward a loading timeout. Media fetching can continue while the Chat tab is hidden. Once the captured data has reached background packaging, saving continues even if that tab is closed. Success is reported only after the browser confirms the download completed.
+
+Keep the Chat tab open until collection finishes. Reloading, closing, or discarding it during collection interrupts the export and leaves a persistent error. Browser restarts do not resume unfinished collection or packaging; the next status check reports the interruption. Native downloads are reconciled with the browser after restart. Switching conversations inside the same Chat tab also stops collection to prevent mixing conversations.
+
+Status metadata for up to 20 recent finished exports is kept locally, along with all active jobs. It includes the conversation name, progress, result filename, and browser tab/download IDs, without message bodies or attachments.
+
 ### Export options
 
 - **Load Full History** traverses the conversation and loads the replies in each discovered thread. Turn it off to export only currently rendered messages, without opening threads or expanding collapsed replies.
@@ -136,7 +146,7 @@ Results are representative rather than universal and vary by machine. This bench
   - `contextMenus`: For convenient right-click options.
   - `downloads`: To save the exported file to your computer.
   - `downloads.open`: To open an exported file only when you click **Open**.
-  - `storage`: To remember your format preferences locally.
+  - `storage`: To keep preferences, incremental checkpoints, and export status locally.
 
 ---
 

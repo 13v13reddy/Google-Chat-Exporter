@@ -6,6 +6,9 @@
 if (typeof importScripts === 'function' && typeof JSZip === 'undefined') {
   importScripts('lib/jszip.min.js');
 }
+if (typeof importScripts === 'function' && typeof ExportJobs === 'undefined') {
+  importScripts('export-jobs.js');
+}
 const mediaRequests = new Map();
 const CHAT_URL_PATTERNS = ['https://chat.google.com/*', 'https://mail.google.com/*',
   'https://chat.google.com.mcas.ms/*', 'https://mail.google.com.mcas.ms/*'];
@@ -139,8 +142,7 @@ async function getExportMode(now = Date.now()) {
 async function setExportMode(enabled) {
   const state = { enabled, exported: [], lastActivity: Date.now() };
   await sessionStore.set({ [EXPORT_MODE_KEY]: state });
-  chrome.action.setBadgeText({ text: enabled ? 'AUTO' : '' }).catch(() => {});
-  if (enabled) chrome.action.setBadgeBackgroundColor({ color: '#1a73e8' }).catch(() => {});
+  await ExportJobs.updateBadge();
   const tabs = await chrome.tabs.query({ url: CHAT_URL_PATTERNS });
   for (const tab of tabs) {
     chrome.tabs.sendMessage(tab.id, { action: 'exportModeChanged', enabled }).catch(() => {});
@@ -197,6 +199,11 @@ function serializeExportMode(work) {
 // ── Message Handler (from popup & content script) ───────────
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  const jobReply = ExportJobs.handleMessage(msg, sender);
+  if (jobReply) {
+    jobReply.then(sendResponse, err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
   const exportModeReply = handleExportModeMessage(msg);
   if (exportModeReply) {
     exportModeReply.then(sendResponse, err => sendResponse({ success: false, error: err.message }));
@@ -221,9 +228,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'packageAndDownload') {
     // Content script sends extracted data here for packaging
     (async () => {
+      // Extension API activity prevents MV3 idle suspension during a long ZIP.
+      // Keep this heartbeat scoped to packaging, never the lifetime of the worker.
+      const keepAlive = typeof setInterval === 'function' ? setInterval(() => {
+        chrome.storage.local.get('gceExportJobs').catch(() => {});
+      }, 20000) : null;
       try {
+        await ExportJobs.beginPackaging(msg.jobId, sender);
         if (msg.payload.sourceUrl && sender.tab?.id) {
-          const tab = await chrome.tabs.get(sender.tab.id);
+          // The payload is already captured; closing its tab cannot cancel packaging.
+          const tab = await chrome.tabs.get(sender.tab.id).catch(() => null);
           if (tab?.url && !isSameConversationUrl(msg.payload.sourceUrl, tab.url)) {
             throw new Error('Conversation changed during export. Please retry.');
           }
@@ -238,10 +252,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           try { await queueCheckpoint(result.downloadId, msg.payload.checkpoint); }
           catch { checkpointWarning = 'Export downloaded, but its checkpoint could not be saved. Next export may repeat messages.'; }
         }
+        await ExportJobs.downloaded(msg.jobId, sender, result,
+          [msg.payload.history?.warning, checkpointWarning].filter(Boolean).join(' '));
         sendResponse({ success: true, ...result, checkpointWarning });
       } catch (err) {
         console.error('[GCE BG] Package error:', err);
+        await ExportJobs.failed(msg.jobId, sender, err.message).catch(console.error);
         sendResponse({ success: false, error: err.message });
+      } finally {
+        if (keepAlive !== null) clearInterval(keepAlive);
       }
     })();
     return true;
@@ -277,6 +296,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 });
+
+// Recover status after a service-worker/browser restart, including native saves.
+ExportJobs.recover().catch(console.error);
 
 // ── Core Export Trigger (PWA-safe) ─────────────────────────
 

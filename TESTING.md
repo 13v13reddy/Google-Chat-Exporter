@@ -10,6 +10,8 @@ Packaging tests load the shipped JSZip library, generate and reopen real archive
 
 Result-card tests cover completed/pending/interrupted downloads, unavailable or foreign files, opening errors, stale status responses, persistent notifications, popup relay deduplication, and dismiss/resize message validation. The native Open API is mocked; these tests verify that the call occurs directly in the extension page's click handler, not that an operating-system application opens.
 
+Background-status regression tests cover hidden history waits, hiding and returning before a throttled timer fires, pausing/resuming a thread without losing replies, and cancelling a hidden export without saving a partial file. Worker/API fixtures verify popup reopening, status recovery in a new worker, source-tab reload/closure, packaging after Chat closes, native download completion/interruption/resumption, unchanged checkpoints on interrupted saves, and dismissal across popup instances. Popup fixtures also reject stale status snapshots and prevent an older job's completion from unlocking a newer running export.
+
 These tests mock `chrome.*` APIs. They do not prove that an installed extension has the required permissions, selects the right iframe, remains active through browser worker suspension, or successfully fetches authenticated Google attachments.
 
 ## Live verification performed
@@ -20,7 +22,9 @@ That check ran the content extraction functions with stubbed extension APIs. It 
 
 ## Known boundaries
 
-- Main history loading uses repeated idle checks to infer that it has reached the start. There is no authoritative total-message count. Very slow history responses and background-tab throttling still require live verification; reply-count checks verify discovered threads, not that every parent in the space was discovered.
+- Main history loading uses repeated idle checks to infer that it has reached the start. There is no authoritative total-message count. Very slow history responses still require live verification; reply-count checks verify discovered threads, not that every parent in the space was discovered.
+- Hidden tabs pause DOM-dependent history/thread collection and resume on return. Media fetching and background packaging do not require the popup to stay open. These changes have automated coverage, but the installed-extension tab-switching and worker lifecycle checks below have not yet been performed. An unfinished extraction or packaging job cannot resume after a browser restart; its retained status becomes interrupted.
+- Packaging uses temporary extension API activity to avoid Chrome's idle worker shutdown. Browser shutdown, crashes, and enforced lifetime or memory limits can still interrupt it; progress metadata survives, while an unfinished archive does not. See [Chrome's worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle).
 - Incremental mode selects newly timestamped messages and previously unseen untimestamped entries. It does not detect an edit to an older message when that message retains its original timestamp. Use a full re-export when updates to old messages must be reflected.
 - The exporter writes separate archive files. It does not synchronize changes back into earlier downloads.
 
@@ -36,6 +40,7 @@ That check ran the content extraction functions with stubbed extension APIs. It 
 | Incremental updates | Export a baseline, then use an existing older thread that receives a new reply. Confirm the next export contains the reply and labeled parent context. |
 | Cancellation and navigation | Cancel during history and media loading. Change conversations during export, including a PWA whose outer URL stays fixed. Confirm no mixed-conversation file is saved. |
 | Downloads and worker lifecycle | Interrupt a download, restart the browser worker, and confirm its checkpoint remains unchanged. A completed download must advance it. |
+| Background status | Start a long export, close the popup, switch to another tab, and reopen the extension there. Confirm WAIT and Return to Chat during history loading, automatic resume on return, and cancellation while hidden. Repeat during media loading and packaging; completed saves must retain Open and ×. Reload/close Chat during collection and verify a persistent interruption error. Restart the worker with both pending and completed downloads. |
 | Scale and timing | Check a long real conversation, slow history loading, background tabs, and large media archives while watching responsiveness and memory. The synthetic Markdown check does not establish a safe limit for media archives. |
 | Language and number formats | Check the Chat UI language in use. Unrecognized reply-count labels must leave the export unverified and its checkpoint unchanged. |
 
