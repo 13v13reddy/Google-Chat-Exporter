@@ -90,8 +90,14 @@ function isInChatFrame() {
 let progressEl = null;
 let exportInProgress = false;
 let exportController = null;
+let progressCleanup = null;
+let progressIsResult = false;
+let progressHideTimer = null;
 
 function showProgress(text, percent, state = 'working') {
+  if (progressIsResult) hideProgress();
+  clearTimeout(progressHideTimer);
+  progressHideTimer = null;
   if (!progressEl) {
     progressEl = document.createElement('div');
     progressEl.id = 'gce-progress';
@@ -169,7 +175,6 @@ function showProgress(text, percent, state = 'working') {
       .gce-bar.done { background: #34a853; }
       .gce-bar.error { background: #ea4335; }
     `;
-    document.documentElement.appendChild(style);
 
     progressEl.innerHTML = `
       <div class="gce-card">
@@ -196,11 +201,12 @@ function showProgress(text, percent, state = 'working') {
           </div>
           <div class="gce-spinner"></div>
           <span class="gce-label">Initializing...</span>
-          <button class="gce-close" title="Dismiss">&times;</button>
+          <button class="gce-close" type="button" title="Dismiss" aria-label="Dismiss export notification">&times;</button>
         </div>
         <div class="gce-bar-wrap"><div class="gce-bar"></div></div>
       </div>`;
 
+    progressEl.appendChild(style);
     document.documentElement.appendChild(progressEl);
     progressEl.querySelector('.gce-close').addEventListener('click', () => {
       if (exportInProgress && exportController) {
@@ -232,10 +238,37 @@ function showProgress(text, percent, state = 'working') {
 }
 
 function hideProgress() {
+  clearTimeout(progressHideTimer);
+  progressHideTimer = null;
+  progressCleanup?.();
+  progressCleanup = null;
+  progressIsResult = false;
   if (progressEl) {
     progressEl.remove();
     progressEl = null;
   }
+}
+
+function scheduleHideProgress(delay) {
+  clearTimeout(progressHideTimer);
+  progressHideTimer = setTimeout(hideProgress, delay);
+}
+
+function showExportResult(result, warning = '', auto = false) {
+  const text = `Saved as ${result.filename}. ${warning}`.trim();
+  if (!Number.isSafeInteger(result.downloadId) || result.downloadId < 0) {
+    showProgress(text, 100, 'done');
+    return;
+  }
+  hideProgress();
+  progressEl = document.createElement('div');
+  progressEl.id = 'gce-progress';
+  progressEl.style.cssText = 'position:fixed;bottom:20px;right:20px;width:min(328px,calc(100vw - 32px));z-index:2147483647;';
+  progressIsResult = true;
+  progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, hideProgress);
+  document.documentElement.appendChild(progressEl);
+  chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent: 100, state: 'done',
+    downloadId: result.downloadId, filename: result.filename, warning, auto }).catch(() => {});
 }
 
 // ── Scroll to Load All Messages ─────────────────────────────
@@ -1299,7 +1332,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
 
     if (!isInChatFrame()) {
       showProgress('⚠️ Please open a Google Chat conversation first.', 0, 'error');
-      setTimeout(hideProgress, 5000);
+      scheduleHideProgress(5000);
       exportInProgress = false;
       exportController = null;
       return 'error';
@@ -1371,11 +1404,11 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     if (!messages || messages.length === 0) {
       if (loadAll && (history.threadsComplete === false || ['limit', 'visible-only'].includes(history.reason))) {
         showProgress(`History scan was incomplete. No export was saved. ${history.warning || 'Please retry.'}`, 0, 'error');
-        setTimeout(hideProgress, 6000);
+        scheduleHideProgress(6000);
         return 'error';
       }
       showProgress(previous ? `No new messages found since the previous export. ${history.warning || ''}` : 'No messages found. Try opening a conversation first.', 100, previous ? 'done' : 'error');
-      setTimeout(hideProgress, 5000);
+      scheduleHideProgress(5000);
       exportInProgress = false;
       exportController = null;
       return 'empty';
@@ -1443,13 +1476,11 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
       payload: { conversationName, messages, mediaFiles, exportDate, sourceUrl, history: { reason: history.reason, warning: history.warning, since: history.since, threadsScanned: history.threadsScanned, threadsComplete: history.threadsComplete }, checkpoint: candidate ? { key: checkpointKey, value: candidate } : null }
     });
       if (resp && resp.success) {
-        const next = auto ? ' Auto-export: open the next channel.' : '';
-        showProgress(`Saved as ${resp.filename}. ${history.warning || ''} ${resp.checkpointWarning || ''}${next}`, 100, 'done');
-        if (!history.warning) setTimeout(hideProgress, 4000);
+        showExportResult(resp, [history.warning, resp.checkpointWarning].filter(Boolean).join(' '), auto);
         return 'done';
       } else {
         showProgress('❌ Export failed: ' + (resp?.error || 'Unknown error'), 0, 'error');
-        setTimeout(hideProgress, 6000);
+        scheduleHideProgress(6000);
         return 'error';
       }
 
@@ -1458,12 +1489,12 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     exportController = null;
     if (err?.name === 'AbortError') {
       showProgress('Export cancelled.', 0, 'error');
-      setTimeout(hideProgress, 2500);
+      scheduleHideProgress(2500);
       return 'cancelled';
     }
     console.error('[GCE] Export error:', err);
     showProgress('❌ Export failed: ' + err.message, 0, 'error');
-    setTimeout(hideProgress, 6000);
+    scheduleHideProgress(6000);
     return 'error';
   } finally {
     if (originalPosition && conversationMatches()) restoreScrollPosition(originalPosition.container, originalPosition.distance, originalPosition.anchor);

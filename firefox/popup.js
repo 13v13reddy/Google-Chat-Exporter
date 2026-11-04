@@ -183,7 +183,33 @@ function resetBtn() {
 
 // ── Status / Progress ────────────────────────────────────────
 
+let resultCleanup = null;
+let resultDownloadId = null;
+let statusHideTimer = null;
+const dismissedResults = new Set();
+
+function hideExportResult() {
+  if (resultDownloadId !== null) dismissedResults.add(resultDownloadId);
+  resultCleanup?.();
+  resultCleanup = null;
+  resultDownloadId = null;
+  $('export-result').hidden = true;
+}
+
+function showExportResult(result) {
+  if (dismissedResults.has(result.downloadId)) return;
+  hideStatus();
+  if (resultDownloadId === result.downloadId) return;
+  hideExportResult();
+  resultDownloadId = result.downloadId;
+  $('export-result').hidden = false;
+  resultCleanup = mountExportResult($('export-result'), result, hideExportResult);
+}
+
 function showStatus(text, percent, state = 'working') {
+  clearTimeout(statusHideTimer);
+  statusHideTimer = null;
+  hideExportResult();
   $('status-area').classList.add('visible');
   $('status-text').textContent = text;
   const bar = $('progress-bar');
@@ -195,6 +221,8 @@ function showStatus(text, percent, state = 'working') {
 }
 
 function hideStatus() {
+  clearTimeout(statusHideTimer);
+  statusHideTimer = null;
   $('status-area').classList.remove('visible');
   $('progress-bar').style.width = '0%';
   $('progress-bar').className = 'progress-bar';
@@ -208,13 +236,19 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
   if (msg.action === 'exportStateUpdate') {
+    if (msg.state === 'done' && Number.isSafeInteger(msg.downloadId) && msg.downloadId >= 0) {
+      if (dismissedResults.has(msg.downloadId)) return;
+      resetBtn();
+      showExportResult(msg);
+      return;
+    }
     showStatus(msg.text || '', msg.percent || 0, msg.state || 'working');
     if (msg.state === 'done') {
       resetBtn();
-      setTimeout(hideStatus, 3500);
+      statusHideTimer = setTimeout(hideStatus, 3500);
     } else if (msg.state === 'error') {
       resetBtn();
-      setTimeout(hideStatus, 5000);
+      statusHideTimer = setTimeout(hideStatus, 5000);
     }
   }
 });

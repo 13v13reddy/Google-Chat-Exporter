@@ -36,6 +36,7 @@ Works across **Google Chrome, Mozilla Firefox, Brave, Microsoft Edge**, standalo
   - **Popup UI**: Modern toolbar popup with live conversation detection, format selection, and progress monitoring.
   - **Context Menu**: Right-click anywhere inside a conversation to export as TXT, Markdown, or HTML with media.
 - **Live Animated HUD**: Real-time progress indicator showing message count, scroll progress, and media download status.
+- **Open After Export**: A persistent result card appears in Chat and in the popup after packaging. **Open** becomes available when the download completes and opens that file with its associated application. Use **×** to dismiss the card without removing the file. HTML exports open as ZIP archives.
 - **100% Private & Client-Side**: All parsing and ZIP generation happen inside your browser. No external servers, no tracking, zero telemetry.
 
 ---
@@ -134,6 +135,7 @@ Results are representative rather than universal and vary by machine. This bench
   - `activeTab` & `scripting`: To read the chat DOM when initiated by you.
   - `contextMenus`: For convenient right-click options.
   - `downloads`: To save the exported file to your computer.
+  - `downloads.open`: To open an exported file only when you click **Open**.
   - `storage`: To remember your format preferences locally.
 
 ---

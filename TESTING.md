@@ -8,6 +8,8 @@ The Node test suite loads both browser sources with synthetic DOM and browser AP
 
 Packaging tests load the shipped JSZip library, generate and reopen real archives, and verify HTML, CSS, attachment bytes, UTF-8 text, and thread metadata. TXT and Markdown downloads are also decoded. Firefox's blob-URL download path is exercised with Node's Blob implementation. A synthetic 10,000-message Markdown export checks that message IDs and Unicode text survive packaging.
 
+Result-card tests cover completed/pending/interrupted downloads, unavailable or foreign files, opening errors, stale status responses, persistent notifications, popup relay deduplication, and dismiss/resize message validation. The native Open API is mocked; these tests verify that the call occurs directly in the extension page's click handler, not that an operating-system application opens.
+
 These tests mock `chrome.*` APIs. They do not prove that an installed extension has the required permissions, selects the right iframe, remains active through browser worker suspension, or successfully fetches authenticated Google attachments.
 
 ## Live verification performed
@@ -27,6 +29,7 @@ That check ran the content extraction functions with stubbed extension APIs. It 
 | Area | Check |
 | --- | --- |
 | Installed desktop extension | Reload the extension and Chat. Export TXT, Markdown, and HTML from both the popup and right-click menu. Reopen the downloaded files. |
+| Result card | Apply the added `downloads.open` permission. Confirm Open waits for completion, opens the exact downloaded file, and × dismisses the card without deleting the file. Check native Open in Chromium and Firefox, including the embedded extension frame. |
 | Browser coverage | Run installed-extension checks in Chromium and Firefox desktop. Test Firefox Android separately because its thread layout can differ. |
 | Chat layouts | Check standalone Chat, Gmail's embedded Chat frame, installed PWA windows, and the supported MCAS proxy hosts. |
 | Authenticated attachments | Verify images, files, audio, and video from actual Google-hosted URLs. Confirm failed attachments warn and prevent checkpoint advancement. |
