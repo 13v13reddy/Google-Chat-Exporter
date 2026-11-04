@@ -9,7 +9,7 @@ const vm = require('node:vm');
 function events() {
   const listeners = new Set();
   return { listeners, addListener(fn) { listeners.add(fn); }, removeListener(fn) { listeners.delete(fn); },
-    emit(value) { for (const fn of [...listeners]) fn(value); } };
+    emit(...values) { for (const fn of [...listeners]) fn(...values); } };
 }
 
 class Element {
@@ -20,10 +20,15 @@ class Element {
     this.disabled = false;
     this.textContent = '';
     this.handlers = new Map();
+    this.attributes = new Map();
+    this.slots = new Map();
     const classes = new Set();
     this.classList = { add: value => classes.add(value), remove: value => classes.delete(value), contains: value => classes.has(value) };
   }
   addEventListener(type, fn) { if (!this.handlers.has(type)) this.handlers.set(type, new Set()); this.handlers.get(type).add(fn); }
+  setAttribute(name, value) { this.attributes.set(name, value); }
+  getAttribute(name) { return this.attributes.get(name) ?? null; }
+  querySelector(selector) { if (!this.slots.has(selector)) this.slots.set(selector, new Element()); return this.slots.get(selector); }
   removeEventListener(type, fn) { this.handlers.get(type)?.delete(fn); }
   emit(type, value) { for (const fn of [...(this.handlers.get(type) || [])]) fn(value); }
   click() { if (!this.disabled) this.emit('click'); }
@@ -43,6 +48,7 @@ function page(target, file, options = {}) {
   const elements = new Map();
   const element = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   const document = {
+    documentElement: new Element(),
     body: new Element(), head: new Element(),
     getElementById: element,
     createElement(tag) { const node = new Element(); if (tag === 'iframe') node.contentWindow = {}; return node; },
@@ -63,6 +69,7 @@ function page(target, file, options = {}) {
   if (options.missing) item = null;
   const searches = [];
   const chrome = {
+    storage: { local: { async get() { return { gceTheme: options.theme }; }, async set() {} }, onChanged: events() },
     runtime: { id: runtimeId, getURL: value => `${origin}/${value}`, onMessage: incoming },
     downloads: {
       async search(query) { searches.push(query); return item ? [item] : []; },
@@ -77,6 +84,7 @@ function page(target, file, options = {}) {
     ResizeObserver: class { observe() {} disconnect() {} }
   });
   const load = name => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, name), 'utf8'), context, { filename: `${target}/${name}` });
+  load('theme.js');
   if (file === 'popup.js') { element('export-result').hidden = true; load('result-host.js'); }
   load(file);
   return { context, load, document, window, chrome, element, elements, posted, opened, searches, timers, changed, erased, incoming, origin,
@@ -84,6 +92,61 @@ function page(target, file, options = {}) {
 }
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: the real progress notification follows the theme and unsubscribes when dismissed`, async () => {
+    const p = page(target, 'result-host.js', { theme: 'dark' });
+    p.document.querySelector = () => null;
+    p.document.querySelectorAll = () => [];
+    p.context.fetch = async () => ({ json: async () => JSON.parse(fs.readFileSync(path.join(__dirname, '..', target, 'selectors.json'), 'utf8')) });
+    p.chrome.runtime.sendMessage = async () => ({});
+    p.load('content.js');
+    await settle();
+    p.context.showProgress('Collecting fixture messages', 15);
+    const root = p.document.documentElement;
+    const notification = root.children[0];
+    assert.equal(notification.getAttribute('data-gce-theme'), 'dark');
+    assert.equal(root.getAttribute('data-gce-theme'), null, 'Chat itself must retain its own theme');
+    p.chrome.storage.onChanged.emit({ gceTheme: { newValue: 'light' } }, 'local');
+    assert.equal(notification.getAttribute('data-gce-theme'), 'light');
+    p.context.hideProgress();
+    p.chrome.storage.onChanged.emit({ gceTheme: { newValue: 'dark' } }, 'local');
+    assert.equal(notification.getAttribute('data-gce-theme'), 'light', 'a dismissed notification must no longer receive updates');
+    assert.equal(root.children.length, 0);
+  });
+
+  test(`${target}: the popup dark-mode toggle saves its choice without hiding export progress`, async () => {
+    const p = page(target, 'popup.js', { theme: 'dark' });
+    await settle();
+    assert.equal(p.document.documentElement.getAttribute('data-gce-theme'), 'dark');
+    assert.equal(p.element('dark-mode').checked, true);
+    p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: 'job-1', state: 'working', phase: 'media',
+      text: 'Downloading media', percent: 50, startedAt: 10, revision: 1 } });
+    let stored;
+    p.chrome.storage.local.set = async value => { stored = value.gceTheme; };
+    p.element('dark-mode').checked = false;
+    await p.context.toggleDarkMode();
+    assert.equal(stored, 'light');
+    assert.equal(p.document.documentElement.getAttribute('data-gce-theme'), 'light');
+    assert.equal(p.element('status-text').textContent, 'Downloading media');
+    p.chrome.storage.local.set = async () => { throw new Error('Storage unavailable'); };
+    p.element('dark-mode').checked = true;
+    await p.context.toggleDarkMode();
+    assert.equal(p.element('dark-mode').checked, false);
+    assert.equal(p.element('theme-error').hidden, false);
+    assert.equal(p.element('export-btn').disabled, true);
+  });
+
+  test(`${target}: a visible saved-result card changes theme without opening or dismissing the file`, async () => {
+    const p = page(target, 'export-result.js', { theme: 'dark', hash: '#id=42&warning=Fixture%20warning' });
+    await settle();
+    assert.equal(p.document.documentElement.getAttribute('data-gce-theme'), 'dark');
+    assert.equal(p.element('heading').textContent, 'Export saved with warnings');
+    p.chrome.storage.onChanged.emit({ gceTheme: { newValue: 'light' } }, 'local');
+    assert.equal(p.document.documentElement.getAttribute('data-gce-theme'), 'light');
+    assert.equal(p.element('open').disabled, false);
+    assert.equal(p.element('warning').textContent, 'Fixture warning');
+    assert.deepEqual(p.opened, []);
+  });
+
   test(`${target}: reopening the popup restores a paused export and controls its original job`, async () => {
     const p = page(target, 'popup.js');
     const calls = [];

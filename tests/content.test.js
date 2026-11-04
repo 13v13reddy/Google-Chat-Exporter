@@ -56,6 +56,7 @@ function loadContent(target = 'chrome') {
     window
   });
   const filename = path.join(__dirname, '..', target, 'content.js');
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, 'theme.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   return context;
 }
@@ -500,6 +501,26 @@ test('export mode tick does not poll background when disabled', async () => {
 });
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: incomplete threads report a reason and reply coverage in the packaged export`, async () => {
+    for (const [options, reason, expected, captured] of [
+      [{ replyLabel: 'Replies' }, 'reply-count-unreadable', null, 3],
+      [{ stuckExpansion: true }, 'collapsed-replies-stalled', 3, 1]
+    ]) {
+      const c = loadContent(target);
+      await c.loadSelectors();
+      installThreadFixture(c, options);
+      let payload;
+      c.chrome.runtime.sendMessage = async msg => { payload = msg.payload; return { success: true, filename: 'Fixture.md' }; };
+      assert.equal(await c.runExport({ format: 'md', incremental: true, sourceUrl: 'https://chat.google.com/app/chat/ROOM' }), 'done');
+      assert.equal(payload.checkpoint, null);
+      const [failure] = payload.history.threadFailures;
+      assert.equal(failure.threadId, 'old-parent');
+      assert.equal(failure.reason, reason);
+      assert.equal(failure.expectedReplies, expected);
+      assert.equal(failure.capturedReplies, captured);
+    }
+  });
+
   test(`${target}: returning before a throttled timer fires still resets the thread render deadline`, async () => {
     const c = loadContent(target);
     const listeners = new Set();

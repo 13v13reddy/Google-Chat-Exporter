@@ -393,7 +393,7 @@ async function ensureContentScript(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId, allFrames: true },
-      files: ['result-host.js', 'content.js']
+      files: ['theme.js', 'result-host.js', 'content.js']
     });
     // Wait for initialization
     await sleep(400);
@@ -461,6 +461,21 @@ function groupMessagesByThread(messages) {
   return groups.sort((a, b) => a.timestamp && b.timestamp ? a.timestamp - b.timestamp : a.order - b.order);
 }
 
+function threadFailureText(failure) {
+  const reasons = {
+    'thread-open-timeout': 'Thread did not open before the loading timeout',
+    'reply-count-unreadable': 'Could not read the expected reply count',
+    'collapsed-replies-stalled': 'Collapsed replies did not expand',
+    'reply-count-mismatch': 'Fewer replies loaded than expected',
+    'parent-not-loaded': 'The parent message was not captured in the thread',
+    'traversal-limit': 'Thread traversal reached its safety limit',
+    'read-error': 'Could not finish reading the thread'
+  };
+  return `Thread ${failure.threadId}: ${reasons[failure.reason] || 'Could not verify completeness'}. ` +
+    `Replies captured: ${failure.capturedReplies ?? 'unknown'}; expected: ${failure.expectedReplies ?? 'unknown'}.` +
+    (failure.error ? ` ${failure.error}` : '');
+}
+
 async function packageTxt({ conversationName, messages, exportDate, history }) {
   const name = conversationName || 'Google Chat';
   const line = '─'.repeat(60);
@@ -474,6 +489,7 @@ async function packageTxt({ conversationName, messages, exportDate, history }) {
     `Exported:  ${new Date(exportDate).toLocaleString()}`,
     ...(history?.threadsScanned ? [`Threads:   ${history.threadsScanned} scanned`] : []),
     ...(history?.warning ? [`Warning:   ${history.warning}`] : []),
+    ...(history?.threadFailures || []).map(threadFailureText),
     ...(history?.since ? [`New since: ${new Date(history.since).toISOString()}`] : []),
     '',
     line,
@@ -543,6 +559,9 @@ function generateMarkdown({ conversationName, messages, exportDate, history }) {
     ''
   ];
   if (history?.warning) lines.push(`> Warning: ${escapeMarkdownLabel(history.warning)}`, '');
+  if (history?.threadFailures?.length) {
+    lines.push('## Thread loading issues', '', ...history.threadFailures.map(failure => `- ${escapeMarkdownLabel(threadFailureText(failure))}`), '');
+  }
 
   let lastDate = '';
   let previousThread = false;
@@ -700,6 +719,7 @@ function generateHtml({ conversationName, messages, exportDate, history }) {
       ${history?.since ? `<p>New since ${esc(new Date(history.since).toISOString())}</p>` : ''}
       ${history?.threadsScanned ? `<p>${history.threadsScanned} threads scanned</p>` : ''}
       ${history?.warning ? `<p>${esc(history.warning)}</p>` : ''}
+      ${history?.threadFailures?.length ? `<details><summary>Thread loading issues</summary><ul>${history.threadFailures.map(failure => `<li>${esc(threadFailureText(failure))}</li>`).join('')}</ul></details>` : ''}
       <p>${messages.length} messages &middot; Exported ${new Date(exportDate).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
     </div>
   </header>

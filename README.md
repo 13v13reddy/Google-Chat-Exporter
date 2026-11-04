@@ -105,6 +105,7 @@ Status metadata for up to 20 recent finished exports is kept locally, along with
 
 ### Export options
 
+- **Dark mode** applies to the extension popup, progress notifications, and saved-export cards. The choice is remembered locally and updates open notifications immediately. Before choosing, the extension follows your system appearance.
 - **Load Full History** traverses the conversation and loads the replies in each discovered thread. Turn it off to export only currently rendered messages, without opening threads or expanding collapsed replies.
 - **Messages Since** filters messages and replies after loading history. Older parent messages can have new replies, so the exporter still checks their threads. An older parent needed to explain an exported reply is labeled as context.
 - **New Since Last Export** saves a per-conversation checkpoint and exports only newer messages on subsequent runs. The first run establishes a baseline; TXT, Markdown, HTML, and HTML-with-media modes use separate checkpoints.
@@ -115,6 +116,8 @@ Each incremental run creates a new file. Keep earlier files to retain the comple
 Thread loading depends on Google Chat's current DOM and reply counts. If a thread cannot be opened, collapsed replies remain, or fewer replies are captured than expected, the export carries an incomplete-history warning and its checkpoint does not advance. Deleted placeholders have no invented timestamp or recovered content.
 
 Reply counts must be readable before a thread can be verified as complete. Unrecognized labels or number formats produce an incomplete-history warning and leave the checkpoint unchanged. If an incomplete scan finds no exportable messages, it reports an error instead of claiming there are no new messages.
+
+An incomplete export includes **Thread loading issues** with each affected thread's ID, failure reason, and captured/expected reply counts. This distinguishes an unreadable count, a thread that did not open, collapsed replies that did not expand, and a reply-count mismatch. The result card says **Export saved with warnings**: the file exists, while its completeness remains unverified.
 
 Thread-aware exports establish a new incremental baseline: checkpoints made before thread support cannot prove that hidden replies were captured. Later incremental exports rescan older threads, retain parent context for new replies, and remember already exported deletion placeholders.
 

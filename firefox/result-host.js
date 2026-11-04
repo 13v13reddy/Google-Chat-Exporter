@@ -14,7 +14,7 @@ function mountExportResult(host, result, onClose) {
   });
   frame.src = `${chrome.runtime.getURL('export-result.html')}#${params}`;
   frame.title = 'Export result';
-  frame.style.cssText = 'display:block;width:100%;height:160px;border:0;background:transparent;color-scheme:light;';
+  frame.style.cssText = 'display:block;width:100%;height:160px;border:0;background:transparent;color-scheme:light dark;';
   const extensionOrigin = chrome.runtime.getURL('').replace(/\/$/, '');
   const listener = event => {
     // Firefox can hide the source window of extension-origin messages.

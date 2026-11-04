@@ -197,6 +197,30 @@ test('triggerDownload converts data URLs to blob URLs in Firefox', async () => {
 });
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: all formats identify incomplete threads and preserve reply counts safely`, async () => {
+    const c = loadBackground(target);
+    const payload = { conversationName: 'Fixture', messages: [], exportDate: '2026-11-04T00:00:00Z', history: {
+      warning: 'Incomplete threads', threadFailures: [
+        { threadId: '<unsafe>', reason: 'reply-count-mismatch', expectedReplies: 10, capturedReplies: 8 },
+        { threadId: 'unknown-count', reason: 'reply-count-unreadable', expectedReplies: null, capturedReplies: 3 }
+      ] } };
+    const markdown = c.generateMarkdown(payload);
+    const html = c.generateHtml(payload);
+    for (const text of [markdown, html]) {
+      assert.match(text, /Thread loading issues/);
+      assert.match(text, /Replies captured: 8; expected: 10/);
+      assert.match(text, /Replies captured: 3; expected: unknown/);
+      assert.match(text, /&lt;unsafe&gt;/);
+      assert.doesNotMatch(text, /<unsafe>/);
+    }
+    let download;
+    c.chrome.downloads.download = (options, callback) => { download = options; callback(1); };
+    await c.packageTxt(payload);
+    const text = Buffer.from(download.url.split(',')[1], 'base64').toString();
+    assert.match(text, /Thread <unsafe>/);
+    assert.match(text, /Replies captured: 8; expected: 10/);
+  });
+
   test(`${target}: export progress can be recovered after the toolbar popup closes`, async () => {
     const c = loadBackground(target);
     const sender = { tab: { id: 7, url: 'https://chat.google.com/app/chat/ROOM' }, frameId: 0 };

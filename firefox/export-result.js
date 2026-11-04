@@ -1,4 +1,5 @@
 'use strict';
+GCETheme.bind(document.documentElement);
 
 const params = new URLSearchParams(location.hash.slice(1));
 const rawId = params.get('id') || '';
@@ -37,7 +38,7 @@ async function refreshDownload() {
     document.getElementById('filename').textContent = item.filename.split(/[\\/]/).pop() || params.get('filename') || 'Export';
     ready = item.state === 'complete' && item.exists !== false;
     openButton.disabled = !ready || opening;
-    heading.textContent = ready ? 'Export saved' : item.state === 'in_progress' ? 'Saving export…' : 'Export unavailable';
+    heading.textContent = ready ? (params.get('warning') ? 'Export saved with warnings' : 'Export saved') : item.state === 'in_progress' ? 'Saving export…' : 'Export unavailable';
     if (item.state === 'interrupted') showError('Download interrupted. Check your browser’s Downloads.');
     else if (item.exists === false) showError('The exported file is no longer available. Check your browser’s Downloads.');
     else showError('');

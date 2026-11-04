@@ -91,6 +91,7 @@ let progressEl = null;
 let exportInProgress = false;
 let exportController = null;
 let progressCleanup = null;
+let progressThemeCleanup = null;
 let progressIsResult = false;
 let progressHideTimer = null;
 let progressJobId = null;
@@ -112,6 +113,14 @@ function showProgress(text, percent, state = 'working') {
     const style = document.createElement('style');
     style.textContent = `
       #gce-progress {
+        --gce-surface: #fff;
+        --gce-text: #3c4043;
+        --gce-muted: #5f6368;
+        --gce-hover: #f1f3f4;
+        --gce-track: #e8eaed;
+        --gce-accent: #1a73e8;
+        --gce-success: #188038;
+        --gce-error: #b3261e;
         position: fixed;
         bottom: 24px;
         right: 24px;
@@ -119,8 +128,19 @@ function showProgress(text, percent, state = 'working') {
         font-family: 'Google Sans', Roboto, sans-serif;
         pointer-events: auto;
       }
+      #gce-progress[data-gce-theme="dark"] {
+        color-scheme: dark;
+        --gce-surface: #202124;
+        --gce-text: #e8eaed;
+        --gce-muted: #bdc1c6;
+        --gce-hover: #35363a;
+        --gce-track: #3c4043;
+        --gce-accent: #8ab4f8;
+        --gce-success: #81c995;
+        --gce-error: #f28b82;
+      }
       .gce-card {
-        background: #fff;
+        background: var(--gce-surface);
         border-radius: 14px;
         box-shadow: 0 8px 30px rgba(0,0,0,0.15), 0 2px 8px rgba(0,0,0,0.08);
         width: 320px;
@@ -140,20 +160,20 @@ function showProgress(text, percent, state = 'working') {
       .gce-spinner {
         width: 18px;
         height: 18px;
-        border: 2.5px solid #e0e0e0;
-        border-top-color: #1a73e8;
+        border: 2.5px solid var(--gce-track);
+        border-top-color: var(--gce-accent);
         border-radius: 50%;
         animation: gce-spin 0.7s linear infinite;
         flex-shrink: 0;
         transition: border-color 0.3s;
       }
-      .gce-spinner.done { border-color: #34a853; border-top-color: #34a853; animation: none; }
-      .gce-spinner.error { border-color: #ea4335; border-top-color: #ea4335; animation: none; }
-      .gce-spinner.paused { animation: none; border-color: #80868b; }
+      .gce-spinner.done { border-color: var(--gce-success); animation: none; }
+      .gce-spinner.error { border-color: var(--gce-error); animation: none; }
+      .gce-spinner.paused { animation: none; border-color: var(--gce-muted); }
       @keyframes gce-spin { to { transform: rotate(360deg); } }
       .gce-label {
         font-size: 13px;
-        color: #3c4043;
+        color: var(--gce-text);
         flex: 1;
         white-space: nowrap;
         overflow: hidden;
@@ -164,24 +184,25 @@ function showProgress(text, percent, state = 'working') {
         background: none;
         border: none;
         font-size: 18px;
-        color: #80868b;
+        color: var(--gce-muted);
         cursor: pointer;
         padding: 0 2px;
         line-height: 1;
         border-radius: 4px;
         flex-shrink: 0;
       }
-      .gce-close:hover { color: #3c4043; background: #f1f3f4; }
-      .gce-bar-wrap { height: 4px; background: #e8eaed; }
+      .gce-close:hover { color: var(--gce-text); background: var(--gce-hover); }
+      .gce-close:focus-visible { outline: 2px solid var(--gce-accent); outline-offset: 2px; }
+      .gce-bar-wrap { height: 4px; background: var(--gce-track); }
       .gce-bar {
         height: 100%;
-        background: #1a73e8;
+        background: var(--gce-accent);
         width: 0%;
         transition: width 0.4s ease, background 0.3s ease;
         border-radius: 0 2px 2px 0;
       }
-      .gce-bar.done { background: #34a853; }
-      .gce-bar.error { background: #ea4335; }
+      .gce-bar.done { background: var(--gce-success); }
+      .gce-bar.error { background: var(--gce-error); }
     `;
 
     progressEl.innerHTML = `
@@ -215,6 +236,7 @@ function showProgress(text, percent, state = 'working') {
       </div>`;
 
     progressEl.appendChild(style);
+    progressThemeCleanup = GCETheme.bind(progressEl);
     document.documentElement.appendChild(progressEl);
     progressEl.querySelector('.gce-close').addEventListener('click', () => {
       if (exportInProgress && exportController) {
@@ -253,6 +275,8 @@ function hideProgress() {
   clearTimeout(progressHideTimer);
   progressHideTimer = null;
   progressCleanup?.();
+  progressThemeCleanup?.();
+  progressThemeCleanup = null;
   progressCleanup = null;
   progressIsResult = false;
   if (progressEl) {
@@ -278,6 +302,7 @@ function showExportResult(result, warning = '', auto = false) {
   progressEl.id = 'gce-progress';
   progressEl.style.cssText = 'position:fixed;bottom:20px;right:20px;width:min(328px,calc(100vw - 32px));z-index:2147483647;';
   progressIsResult = true;
+  progressThemeCleanup = GCETheme.bind(progressEl);
   const jobId = exportJobId;
   progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, () => {
     if (jobId) chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId }).catch(() => {});
@@ -414,11 +439,11 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null, isCurr
     await collectCurrent();
     const warning = [
       reason === 'limit' ? 'History scan reached its safety limit; export may be incomplete.' : '',
-      threads.failed ? `${threads.failed} thread(s) could not be completely loaded; export may be incomplete and its checkpoint will not advance.` : ''
+      threads.failed ? `${threads.failed} thread(s) could not be completely loaded; export may be incomplete and its checkpoint will not advance. See thread loading issues in the export.` : ''
     ].filter(Boolean).join(' ');
     onProgress && onProgress(warning ? `${dedupMap.size} messages collected. ${warning}` : `${dedupMap.size} messages collected.`);
 
-    return { reason, warning, threadsComplete: !threads.failed, threadsScanned: threads.scanned, messages: [...dedupMap.values()].sort(
+    return { reason, warning, threadFailures: threads.failures, threadsComplete: !threads.failed, threadsScanned: threads.scanned, messages: [...dedupMap.values()].sort(
       (a, b) => (a.absoluteTimestamp || 0) - (b.absoluteTimestamp || 0)
     ) };
   } finally {
@@ -495,6 +520,13 @@ async function readThreadMessages(view, topic, expectedReplies, signal, isCurren
     const ids = new Set([...messages.values()].map(msg => msg.messageId));
     return expectedReplies !== null && ids.has(topic) && ids.size - 1 >= expectedReplies;
   };
+  const finish = (complete, reason = '') => {
+    const ids = new Set([...messages.values()].map(msg => msg.messageId).filter(Boolean));
+    return { messages: [...messages.values()], complete, expectedReplies,
+      capturedReplies: [...ids].filter(id => id !== topic).length,
+      reason: complete ? '' : reason || (expectedReplies === null ? 'reply-count-unreadable' :
+        ids.has(topic) ? 'reply-count-mismatch' : 'parent-not-loaded') };
+  };
 
   try {
     // Expand explicit collapsed-message controls as well as traversing the
@@ -511,12 +543,12 @@ async function readThreadMessages(view, topic, expectedReplies, signal, isCurren
         if (collapsed) {
           collapsed.click();
           const changed = await waitForThreadCondition(() => threadSignature(view) !== before, signal);
-          if (!changed) return { messages: [...messages.values()], complete: false };
+          if (!changed) return finish(false, 'collapsed-replies-stalled');
           await sleep(150, signal);
           idle = 0;
           continue;
         }
-        if (accountedFor()) return { messages: [...messages.values()], complete: true };
+        if (accountedFor()) return finish(true);
 
         const oldTop = view.scrollTop;
         const maxTop = Math.max(0, view.scrollHeight - view.clientHeight);
@@ -528,11 +560,11 @@ async function readThreadMessages(view, topic, expectedReplies, signal, isCurren
         if (threadSignature(view) !== before) idle = 0;
         else if (boundary && Math.abs(view.scrollTop - oldTop) <= 1) idle++;
         if (idle >= 3) break;
-        if (step === 999) return { messages: [...messages.values()], complete: false };
+        if (step === 999) return finish(false, 'traversal-limit');
       }
     }
     collect();
-    return { messages: [...messages.values()], complete: accountedFor() };
+    return finish(accountedFor());
   } finally {
     cache.disconnect();
   }
@@ -545,10 +577,11 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
   const previousTop = previous?.scrollTop || 0;
   const initialUrl = typeof location !== 'undefined' ? location.href : '';
   let lastOpened = '';
-  let failed = 0;
+  const failures = [];
 
   return {
-    get failed() { return failed; },
+    get failed() { return failures.length; },
+    get failures() { return [...failures]; },
     get scanned() { return visited.size; },
     async collect() {
       if (!SEL.threadOpen) return [];
@@ -574,13 +607,18 @@ function createThreadCollector(main, onProgress, signal, isCurrent = null) {
             lastOpened = topic;
             open.click();
             const view = await waitForThreadCondition(() => findThreadView(topic), signal);
-            if (!view) { failed++; continue; }
+            if (!view) {
+              failures.push({ threadId: topic, reason: 'thread-open-timeout', expectedReplies: expected, capturedReplies: 0 });
+              continue;
+            }
             const result = await readThreadMessages(view, topic, expected, signal, isCurrent);
             messages.push(...result.messages);
-            if (!result.complete) failed++;
+            if (!result.complete) failures.push({ threadId: topic, reason: result.reason,
+              expectedReplies: result.expectedReplies, capturedReplies: result.capturedReplies });
           } catch (error) {
             if (['AbortError', 'ConversationChangedError'].includes(error.name)) throw error;
-            failed++;
+            failures.push({ threadId: topic, reason: 'read-error', expectedReplies: expected,
+              capturedReplies: null, error: String(error.message || error.name).slice(0, 240) });
           }
         }
       } finally {
@@ -1555,7 +1593,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
       action: 'packageAndDownload',
       jobId: exportJobId,
       format,
-      payload: { conversationName, messages, mediaFiles, exportDate, sourceUrl, history: { reason: history.reason, warning: history.warning, since: history.since, threadsScanned: history.threadsScanned, threadsComplete: history.threadsComplete }, checkpoint: candidate ? { key: checkpointKey, value: candidate } : null }
+      payload: { conversationName, messages, mediaFiles, exportDate, sourceUrl, history: { reason: history.reason, warning: history.warning, since: history.since, threadsScanned: history.threadsScanned, threadsComplete: history.threadsComplete, threadFailures: history.threadFailures }, checkpoint: candidate ? { key: checkpointKey, value: candidate } : null }
     });
       if (resp && resp.success) {
         exportPhase = 'download';

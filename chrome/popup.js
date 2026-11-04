@@ -5,6 +5,17 @@
 'use strict';
 
 const $ = id => document.getElementById(id);
+GCETheme.bind(document.documentElement);
+GCETheme.subscribe(theme => { $('dark-mode').checked = theme === 'dark'; });
+
+async function toggleDarkMode() {
+  $('theme-error').hidden = true;
+  try { await GCETheme.set($('dark-mode').checked ? 'dark' : 'light'); }
+  catch {
+    $('theme-error').textContent = 'Could not save the theme. Try again.';
+    $('theme-error').hidden = false;
+  }
+}
 
 // ── Settings persistence ─────────────────────────────────────
 
@@ -170,7 +181,7 @@ function setExporting() {
   const btn = $('export-btn');
   btn.disabled = true;
   btn.innerHTML = `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="animation:spin .7s linear infinite;fill:white;width:17px;height:17px;flex-shrink:0">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="animation:spin .7s linear infinite;fill:currentColor;width:17px;height:17px;flex-shrink:0">
       <path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/>
     </svg>
     Exporting...`;
@@ -181,7 +192,7 @@ function resetBtn() {
   const btn = $('export-btn');
   btn.disabled = false;
   btn.innerHTML = `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="fill:white;width:17px;height:17px;flex-shrink:0">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" style="fill:currentColor;width:17px;height:17px;flex-shrink:0">
       <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
     </svg>
     Export Current Conversation`;
@@ -352,6 +363,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('date-from').addEventListener('change', saveSettings);
   $('incremental').addEventListener('change', () => { updateIncrementalControls(); saveSettings(); });
   $('export-mode').addEventListener('change', toggleExportMode);
+  $('dark-mode').addEventListener('change', toggleDarkMode);
   $('return-to-chat').addEventListener('click', () => controlExportJob('focusExportJob'));
   $('cancel-export').addEventListener('click', () => controlExportJob('cancelExportJob'));
   $('dismiss-status').addEventListener('click', () => dismissExportJob());

@@ -61,9 +61,11 @@ test('both browser packages can load the privileged export result card from Chat
     const manifest = JSON.parse(fs.readFileSync(path.join(root, target, 'manifest.json'), 'utf8'));
     assert.ok(manifest.permissions.includes('downloads.open'));
     assert.ok(manifest.content_scripts.every(script => script.js.includes('result-host.js') && script.js.indexOf('result-host.js') < script.js.indexOf('content.js')));
+    assert.ok(manifest.content_scripts.every(script => script.js.indexOf('theme.js') >= 0 && script.js.indexOf('theme.js') < script.js.indexOf('content.js')));
     assert.ok(manifest.web_accessible_resources.some(resource => resource.resources.includes('export-result.html')));
     const result = fs.readFileSync(path.join(root, target, 'export-result.html'), 'utf8');
     assert.match(result, /src="export-result\.js"/);
+    assert.ok(result.indexOf('src="theme.js"') >= 0 && result.indexOf('src="theme.js"') < result.indexOf('src="export-result.js"'));
     assert.match(result, /aria-label="Dismiss export notification"/);
     const popup = fs.readFileSync(path.join(root, target, 'popup.html'), 'utf8');
     assert.ok(popup.includes('src="result-host.js"') && popup.indexOf('src="result-host.js"') < popup.indexOf('src="popup.js"'));
