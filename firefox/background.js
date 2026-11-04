@@ -12,7 +12,7 @@ if (typeof importScripts === 'function' && typeof ExportJobs === 'undefined') {
 const mediaRequests = new Map();
 const CHAT_URL_PATTERNS = ['https://chat.google.com/*', 'https://mail.google.com/*',
   'https://chat.google.com.mcas.ms/*', 'https://mail.google.com.mcas.ms/*'];
-const CONTENT_PROTOCOL = 1; // Keep in sync with content.js getExportHealth().
+const CONTENT_PROTOCOL = 1; // Shared by content health and popup startup replies.
 const contentPreparations = new Map();
 // Persist pending download/checkpoint associations so worker suspension is safe.
 let checkpointQueue = Promise.resolve();
@@ -218,9 +218,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const tab = await chrome.tabs.get(msg.tabId);
         if (!tab.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) throw new Error('Open a conversation in Google Chat.');
         const frame = await ensureContentScript(tab.id);
-        sendResponse({ success: true, name: frame.name });
+        sendResponse({ success: true, protocol: CONTENT_PROTOCOL, name: frame.name });
       } catch (error) {
-        sendResponse({ success: false, error: error.message });
+        sendResponse({ success: false, protocol: CONTENT_PROTOCOL, error: error.message });
       }
     })();
     return true;
@@ -234,9 +234,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!tab) { sendResponse({ success: false, error: 'No active tab found.' }); return; }
         const started = await triggerExport(tab, msg.format || 'txt', msg.settings, msg.jobId);
         if (!started) { sendResponse({ success: false, error: 'Could not prepare Google Chat for export. Refresh the tab and try again.' }); return; }
-        sendResponse({ success: true, jobId: started.jobId });
+        sendResponse({ success: true, protocol: CONTENT_PROTOCOL, jobId: started.jobId });
       } catch (err) {
-        sendResponse({ success: false, error: err.message });
+        sendResponse({ success: false, protocol: CONTENT_PROTOCOL, error: err.message });
       }
     })();
     return true; // keep channel open

@@ -100,6 +100,39 @@ function page(target, file, options = {}) {
 }
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: a new popup detects an older background worker and gives the required reload instruction`, async () => {
+    for (const response of [undefined, { success: true, name: 'Fixture room' }]) {
+      const p = page(target, 'popup.js');
+      p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
+      p.chrome.runtime.sendMessage = async () => response;
+      await p.context.detectConversation();
+      assert.equal(p.element('export-btn').disabled, true);
+      assert.match(p.element('connection-error').textContent, /Reload the extension.*refresh.*Chat/i);
+    }
+  });
+
+  test(`${target}: the current worker enables export and preserves a tab-only refresh error`, async () => {
+    const p = page(target, 'popup.js');
+    p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
+    p.chrome.runtime.sendMessage = async () => ({ success: true, protocol: 1, name: 'Fixture room' });
+    await p.context.detectConversation();
+    assert.equal(p.element('export-btn').disabled, false);
+    assert.equal(p.element('conv-name').textContent, 'Fixture room');
+    p.chrome.runtime.sendMessage = async () => ({ success: false, protocol: 1, error: 'Refresh the Chat tab to finish updating the extension.' });
+    await p.context.detectConversation();
+    assert.match(p.element('connection-error').textContent, /^Refresh the Chat tab/);
+  });
+
+  test(`${target}: a legacy startup acknowledgement cannot leave the new popup waiting for the wrong job`, async () => {
+    const p = page(target, 'popup.js');
+    p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
+    p.chrome.runtime.sendMessage = async () => ({ success: true });
+    await p.context.triggerExport();
+    assert.equal(p.element('export-btn').disabled, false);
+    assert.equal(p.timers.size, 0);
+    assert.match(p.element('status-text').textContent, /Reload the extension/i);
+  });
+
   test(`${target}: the range control round-trips existing export settings without losing a mode`, async () => {
     for (const [range, loadAll, incremental, dateFrom] of [
       ['all', true, false, ''], ['since', true, false, '2026-10-12'],
@@ -157,7 +190,7 @@ for (const target of ['chrome', 'firefox']) {
     await loading;
     assert.equal(p.element('export-btn').disabled, true);
     assert.match(p.element('status-text').textContent, /Starting/);
-    accept({ success: true, jobId: requested.jobId });
+    accept({ success: true, protocol: 1, jobId: requested.jobId });
     await starting;
     p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: requested.jobId, state: 'working', phase: 'history', text: 'Loading messages', percent: 15, startedAt: 20, revision: 1 } });
     assert.equal(p.element('status-text').textContent, 'Loading messages');
@@ -175,7 +208,7 @@ for (const target of ['chrome', 'firefox']) {
     const p = page(target, 'popup.js');
     let requested;
     p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
-    p.chrome.runtime.sendMessage = async message => { requested = message; return { success: true, jobId: message.jobId }; };
+    p.chrome.runtime.sendMessage = async message => { requested = message; return { success: true, protocol: 1, jobId: message.jobId }; };
     await p.context.triggerExport();
     assert.ok(p.timers.size > 0, 'starting cannot spin forever without a job update');
     [...p.timers.values()][0]();
@@ -200,7 +233,7 @@ for (const target of ['chrome', 'firefox']) {
     await first;
     assert.equal(p.element('export-btn').disabled, true);
     assert.match(p.element('status-text').textContent, /Starting/);
-    requests[1].resolve({ success: true, jobId: requests[1].message.jobId });
+    requests[1].resolve({ success: true, protocol: 1, jobId: requests[1].message.jobId });
     await retry;
     p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: requests[1].message.jobId, state: 'working', phase: 'history', text: 'Loading retry', percent: 15, startedAt: 20, revision: 1 } });
     assert.equal(p.element('status-text').textContent, 'Loading retry');

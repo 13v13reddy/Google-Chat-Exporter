@@ -118,6 +118,8 @@ Each incremental run creates a new file. Keep earlier files to retain the comple
 
 After updating the extension, refresh existing Chat tabs. Startup checks the content-script protocol and reports an explicit refresh error when a tab still has older code.
 
+For an unpacked development installation, reload the extension before refreshing Chat. Newly opened popup pages can otherwise load changed files while the background worker is still running older code. The popup checks the worker protocol and startup job ID and reports the required extension reload instead of waiting for incompatible progress updates.
+
 Thread loading depends on Google Chat's current DOM and reply counts. If a thread cannot be opened, collapsed replies remain, or fewer replies are captured than expected, the export carries an incomplete-history warning and its checkpoint does not advance. Deleted placeholders have no invented timestamp or recovered content.
 
 Reply counts must be readable before a thread can be verified as complete. Unrecognized labels or number formats produce an incomplete-history warning and leave the checkpoint unchanged. If an incomplete scan finds no exportable messages, it reports an error instead of claiming there are no new messages.

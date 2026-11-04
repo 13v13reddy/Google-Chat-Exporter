@@ -70,6 +70,7 @@ for (const target of ['chrome', 'firefox']) {
     const fixture = installFrames(c, target, [{ id: 0, mail: true }, { id: 3, chat: true }]);
     const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'getConversation', tabId: 7 }, {}, resolve));
     assert.equal(response.success, true);
+    assert.equal(response.protocol, 1);
     assert.equal(response.name, 'Fixture room');
     assert.equal(fixture.starts.length, 0);
   });
@@ -81,6 +82,15 @@ for (const target of ['chrome', 'firefox']) {
     assert.deepEqual(fixture.starts.map(start => start.frameId), [3]);
     assert.deepEqual(fixture.injections, [{ frameIds: [3], files: ['theme.js'] }]);
     assert.equal(fixture.messages.find(message => message.action === 'startExport').options.frameId, 3);
+  });
+
+  test(`${target}: startup replies identify the worker protocol and the exact accepted job`, async () => {
+    const c = loadBackground(target);
+    installFrames(c, target, [{ id: 0, chat: true }]);
+    const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'popupExport', tabId: 7, format: 'md', jobId: 'job-protocol' }, {}, resolve));
+    assert.equal(response.success, true);
+    assert.equal(response.protocol, 1);
+    assert.equal(response.jobId, 'job-protocol');
   });
 
   test(`${target}: cold-frame startup is shared so simultaneous requests cannot redeclare scripts`, async () => {
