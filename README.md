@@ -21,7 +21,8 @@ Works across **Google Chrome, Mozilla Firefox, Brave, Microsoft Edge**, standalo
   - **Structured HTML (`.html + .zip`)**: Complete conversational archive with sender avatars, speech bubbles, embedded images, GIFs, audio notes, video chips, documents, and Google Meet call links.
 - **Full Media Extraction**: Automatically downloads photos, GIFs, file attachments, and video previews into a neat `media/` folder inside the ZIP.
 - **Adaptive History Loading**: Loads history batch-by-batch and continues as soon as Google Chat adds the next batch.
-- **Optional Date Cutoff**: Stop loading once the export reaches a selected “messages since” date.
+- **Thread Replies**: Opens discovered threads, expands collapsed replies, and groups replies with their parent in every export format. Deleted messages remain explicit placeholders. Thread loading uses the Chat UI and restores your previous thread and scroll position when available.
+- **Optional Date Filter**: Export messages and replies since a selected date, with older parents retained as labeled context when needed. History loading still checks older threads for newer replies.
 - **New Since Last Export**: Optional per-conversation checkpoints for TXT, Markdown, HTML, and HTML with attachments. Each run saves a separate file; the first run establishes a baseline. Checkpoints advance after a completed download. Turn the option off for a full re-export.
 - **Auto-Export on Open**: Turn it on in the popup, then open each channel you want; every channel is exported once with your current settings as soon as it loads. Switching away mid-export cancels that export so it retries on your next visit. The mode turns off after 10 minutes without a channel switch and whenever the browser restarts; an `AUTO` badge shows while it is on.
 - **Concurrent Media Downloads**: Downloads up to four attachments at a time.
@@ -29,6 +30,7 @@ Works across **Google Chrome, Mozilla Firefox, Brave, Microsoft Edge**, standalo
 - **Universal Compatibility**:
   - Standalone Google Chat (`chat.google.com`)
   - Gmail-integrated Google Chat (`mail.google.com`)
+  - Company-proxied Google Chat and Gmail (`chat.google.com.mcas.ms`, `mail.google.com.mcas.ms`)
   - Progressive Web App (PWA) / standalone window mode (fully tested and working in Brave & Chrome)
 - **Two Easy Export Methods**:
   - **Popup UI**: Modern toolbar popup with live conversation detection, format selection, and progress monitoring.
@@ -91,18 +93,20 @@ Install directly from your browser's official store:
 
 ### Export options
 
-- **Load Full History** traverses the conversation before exporting. Turn it off to export only currently rendered messages.
-- **Messages Since** stops history loading after reaching the selected date.
+- **Load Full History** traverses the conversation and loads the replies in each discovered thread. Turn it off to export only currently rendered messages, without opening threads or expanding collapsed replies.
+- **Messages Since** filters messages and replies after loading history. Older parent messages can have new replies, so the exporter still checks their threads. An older parent needed to explain an exported reply is labeled as context.
 - **New Since Last Export** saves a per-conversation checkpoint and exports only newer messages on subsequent runs. The first run establishes a baseline; TXT, Markdown, HTML, and HTML-with-media modes use separate checkpoints.
 - **Include Media** downloads attachments when HTML is selected.
 
 Each incremental run creates a new file. Keep earlier files to retain the complete archive. Checkpoints are local to the browser profile and advance only after Chrome reports a completed download.
 
-Thread support is limited: the exporter does not open every thread or preserve parent/reply relationships. Replies already rendered in the page may be included as ordinary messages, but collapsed-thread replies can be missing, even with Load Full History enabled.
+Thread loading depends on Google Chat's current DOM and reply counts. If a thread cannot be opened, collapsed replies remain, or fewer replies are captured than expected, the export carries an incomplete-history warning and its checkpoint does not advance. Deleted placeholders have no invented timestamp or recovered content.
+
+Thread-aware exports establish a new incremental baseline: checkpoints made before thread support cannot prove that hidden replies were captured. Later incremental exports rescan older threads, retain parent context for new replies, and remember already exported deletion placeholders.
 
 ### Markdown for agents
 
-Markdown provides explicit message boundaries without HTML styling. Each message has a sender and timestamp heading; its body is preserved in a fenced `text` block, including code snippets, line breaks, and literal Markdown or HTML. Absolute timestamps use UTC; messages without them keep the displayed Chat time. Date headings retain Chat's displayed date labels.
+Markdown provides explicit message boundaries without HTML styling. Replies are grouped under their thread, with message IDs and reply-to IDs. Each message has a sender and timestamp heading; its body is preserved in a fenced `text` block, including code snippets, line breaks, and literal Markdown or HTML. Absolute timestamps use UTC; messages without them keep the displayed Chat time. Date headings retain Chat's displayed date labels.
 
 Attachments appear as named links, so agents can identify files without loading binary content. These links may require a Google login or expire. Use HTML with media when you need an archive containing downloaded attachments.
 

@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { installThreadFixture } = require('./helpers/thread-fixture');
 
 function loadContent(target = 'chrome') {
   const event = { addListener() {} };
@@ -499,6 +500,112 @@ test('export mode tick does not poll background when disabled', async () => {
 });
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: history scans older parents, expands replies, and retains deleted placeholders`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const fixture = installThreadFixture(c, { virtualized: true });
+    const history = await c.scrollToLoadAll(null, 100);
+    assert.equal(history.reason, 'idle', 'the main cutoff cannot skip an old parent with a new reply');
+    assert.equal(history.threadsComplete, true);
+    assert.equal(history.threadsScanned, 1);
+    assert.equal(history.messages.length, 5, 'two main messages plus three replies, without a duplicate parent');
+    const reply = history.messages.find(msg => msg.messageId === 'new-reply');
+    assert.equal(reply.parentMessageId, 'old-parent');
+    assert.equal(reply.threadId, 'old-parent');
+    const deleted = history.messages.find(msg => msg.messageId === 'deleted-reply');
+    assert.equal(deleted.deleted, true);
+    assert.equal(deleted.absoluteTimestamp, 0, 'a deleted reply does not get an invented timestamp');
+    assert.equal(deleted.parentMessageId, 'old-parent');
+    assert.deepEqual(fixture.actions, ['open-thread', 'expand-replies', 'close-thread']);
+    assert.equal(fixture.main.scrollTop, 400);
+  });
+
+  test(`${target}: cancellation closes the thread opened by the exporter and restores the main viewport`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const controller = new AbortController();
+    const fixture = installThreadFixture(c, { onOpen: () => controller.abort() });
+    await assert.rejects(c.scrollToLoadAll(null, 0, controller.signal), { name: 'AbortError' });
+    assert.deepEqual(fixture.actions, ['open-thread', 'close-thread']);
+    assert.equal(fixture.main.scrollTop, 400);
+  });
+
+  test(`${target}: an already-open thread is restored after scanning`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const fixture = installThreadFixture(c, { previousThread: true });
+    fixture.panel.scrollTop = 75;
+    await c.scrollToLoadAll();
+    assert.equal(fixture.state.active, 'old-parent');
+    assert.equal(fixture.panel.scrollTop, 75);
+    assert.ok(!fixture.actions.includes('close-thread'));
+  });
+
+  test(`${target}: an incomplete thread warns and prevents a checkpoint`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    installThreadFixture(c, { stuckExpansion: true });
+    let payload;
+    c.chrome.runtime.sendMessage = async msg => { payload = msg.payload; return { success: true, filename: 'fixture.md' }; };
+    assert.equal(await c.runExport({ format: 'md', incremental: true, sourceUrl: 'https://chat.google.com/app/chat/ROOM' }), 'done');
+    assert.equal(payload.history.threadsComplete, false);
+    assert.match(payload.history.warning, /thread.*could not be completely loaded/i);
+    assert.equal(payload.checkpoint, null);
+  });
+
+  test(`${target}: incremental thread exports include parent context and do not repeat known deleted replies`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const fixture = installThreadFixture(c, { virtualized: true });
+    const stored = {};
+    c.chrome.storage.local.get = async key => ({ [key]: stored[key] });
+    const packages = [];
+    c.chrome.runtime.sendMessage = async msg => {
+      packages.push(msg.payload);
+      stored[msg.payload.checkpoint.key] = msg.payload.checkpoint.value;
+      return { success: true, filename: 'fixture.md' };
+    };
+    const options = { format: 'md', incremental: true, sourceUrl: 'https://chat.google.com/app/chat/ROOM' };
+    assert.equal(await c.runExport(options), 'done');
+    assert.equal(packages[0].messages.length, 5);
+    assert.equal(packages[0].checkpoint.value.undatedFingerprints.length, 1);
+    assert.equal(await c.runExport(options), 'empty', 'a known deletion placeholder does not force another file');
+    fixture.addReply({ id: 'later', topic: 'old-parent', time: 400, text: 'A later answer', sender: 'Eve' });
+    assert.equal(await c.runExport(options), 'done');
+    const withContext = packages[1].messages;
+    assert.equal(withContext.length, 2);
+    assert.equal(withContext[0].messageId, 'old-parent');
+    assert.equal(withContext[0].contextOnly, true);
+    assert.equal(withContext[1].messageId, 'later');
+    const checkpoint = packages[1].checkpoint.value;
+    assert.equal(checkpoint.timestamp, 400);
+    assert.equal(checkpoint.undatedFingerprints.length, 1, 'known untimestamped messages survive subsequent checkpoints');
+    assert.equal(await c.runExport(options), 'empty');
+    assert.equal(packages.length, 2);
+  });
+
+  test(`${target}: thread-aware exports establish a new baseline instead of trusting timeline-only checkpoints`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    installThreadFixture(c);
+    const scope = c.checkpointScope('https://chat.google.com/app/chat/ROOM', 'md', true);
+    const legacyKey = `gceCheckpoint:${await c.hashCheckpointValue(scope)}`;
+    c.chrome.storage.local.get = async key => ({ [key]: key === legacyKey ? { timestamp: 1000, fingerprints: [] } : undefined });
+    let payload;
+    c.chrome.runtime.sendMessage = async msg => { payload = msg.payload; return { success: true, filename: 'fixture.md' }; };
+    await c.runExport({ format: 'md', incremental: true, sourceUrl: 'https://chat.google.com/app/chat/ROOM' });
+    assert.equal(payload.messages.length, 5);
+    assert.notEqual(payload.checkpoint.key, legacyKey);
+  });
+
+  test(`${target}: MCAS conversation identities are accepted without accepting lookalike hosts`, () => {
+    const c = loadContent(target);
+    assert.equal(c.checkpointScope('https://chat.google.com.mcas.ms/app/chat/ROOM', 'md', false), 'chat.google.com.mcas.ms|0|chat|ROOM|md');
+    assert.ok(c.checkpointScope('https://mail.google.com.mcas.ms/mail/u/1/#chat/space/ROOM', 'txt', false));
+    assert.equal(c.checkpointScope('https://chat.google.com.mcas.ms.example.org/app/chat/ROOM', 'md', false), '');
+    assert.equal(c.checkpointScope('http://chat.google.com.mcas.ms/app/chat/ROOM', 'md', false), '');
+  });
+
   test(`${target}: Markdown checkpoints stay separate from TXT and both HTML modes`, async () => {
     const c = loadContent(target);
     const url = 'https://chat.google.com/u/0/app/chat/ABC';

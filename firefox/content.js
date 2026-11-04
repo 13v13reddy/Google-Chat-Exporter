@@ -9,6 +9,7 @@
 // ── Selector Configuration ──────────────────────────────────
 // Loaded from selectors.json; populated on init
 let SEL = null;
+const CHAT_HOSTS = ['chat.google.com', 'mail.google.com', 'chat.google.com.mcas.ms', 'mail.google.com.mcas.ms'];
 
 async function loadSelectors() {
   if (SEL) return SEL;
@@ -23,6 +24,14 @@ async function loadSelectors() {
       frameName: 'single_full_screen',
       scrollContainers: ['.Bl2pUd','[role="main"]','div[data-is-scroll-wrapper="true"]','[data-conversation-container]'],
       messageGroups: 'div.nF6pT',
+      deletedMessage: 'div.Ao1xUb[role="group"][data-id]',
+      mainMessages: '.Bl2pUd',
+      threadOpen: 'div.CYx15d[role="button"]',
+      threadScroll: '.lFJYcb[jsname="sGWpWe"]',
+      threadPanel: '.hSo9Ub',
+      threadClose: '.DaIyce[jsname="TvD9Pc"] button',
+      collapsedMessages: '[data-collapsed-count][role="button"]',
+      topicContainer: '[data-topic-id]',
       messageText: 'div.DTp27d[jsname="bgckF"], div.DTp27d.Zc1Emd, div.GDhqjd, div.vdlEi',
       senderNameText: 'span.njhDLd, span.zX8Xib',
       senderNameAttr: 'span.ZTmjQb[data-name]',
@@ -52,6 +61,7 @@ async function loadSelectors() {
       attrs: {
         absoluteTimestamp: 'data-absolute-timestamp',
         groupId: 'data-id',
+        topicId: 'data-topic-id',
         senderName: 'data-name',
         mediaUrl: 'data-media-url',
         mediaDuration: 'data-media-duration-ms',
@@ -231,6 +241,8 @@ function hideProgress() {
 // ── Scroll to Load All Messages ─────────────────────────────
 
 function findScrollContainer() {
+  const main = SEL.mainMessages && document.querySelector(SEL.mainMessages);
+  if (main) return main;
   for (const sel of SEL.scrollContainers) {
     const el = document.querySelector(sel);
     if (el && el.scrollHeight > el.clientHeight) return el;
@@ -262,20 +274,21 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null) {
   );
   const anchor = captureScrollAnchor(container);
   const extractionCache = createExtractionCache(container);
+  const threads = createThreadCollector(container, onProgress, signal);
   let reason = 'limit';
 
   const dedupMap = new Map();
-  const collectCurrent = () => {
-    for (const msg of extractMessages(extractionCache)) {
+  const collectCurrent = async () => {
+    for (const msg of [...extractMessages(extractionCache, container), ...await threads.collect()]) {
       const key = msg._dedupKey || `${msg.sender}|${msg.absoluteTimestamp}|${(msg.text || '').slice(0, 80)}`;
       dedupMap.set(key, msg);
     }
   };
 
   try {
-    collectCurrent();
+    await collectCurrent();
     let prevHeight = container.scrollHeight;
-    let prevOldest = getOldestTimestamp();
+    let prevOldest = getOldestTimestamp(container);
     let stableBatches = 0;
     let batches = 0;
     const MAX_BATCHES = 3000;
@@ -287,15 +300,8 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null) {
       throwIfAborted(signal);
       batches++;
 
-      // Stop early if we've passed our date range
-      if (dateFromTs) {
-        const oldest = getOldestTimestamp();
-        if (oldest && oldest < dateFromTs) {
-          onProgress && onProgress('Reached date range boundary — stopping scroll.');
-          reason = 'date-boundary';
-          break;
-        }
-      }
+      // Old parent messages can have new replies. Scan every parent and apply
+      // the requested date/checkpoint only after all its threads are collected.
 
       // Overlap viewports so virtualized messages are collected before eviction.
       const beforeCount = dedupMap.size;
@@ -305,9 +311,9 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null) {
         targetTop > 1 ? 250 : 600 * (stableBatches + 1), signal, targetTop > 1);
       container.scrollTop = targetTop;
       await wait;
-      collectCurrent();
+      await collectCurrent();
 
-      const oldest = getOldestTimestamp();
+      const oldest = getOldestTimestamp(container);
       const curHeight = container.scrollHeight;
       const advanced = dedupMap.size > beforeCount || curHeight !== prevHeight || (oldest && oldest !== prevOldest);
 
@@ -325,19 +331,173 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null) {
       }
     }
 
-    collectCurrent();
-    const warning = reason === 'date-boundary' ? '' : reason === 'limit'
-      ? 'History scan reached its safety limit; export may be incomplete.'
-      : '';
+    await collectCurrent();
+    const warning = [
+      reason === 'limit' ? 'History scan reached its safety limit; export may be incomplete.' : '',
+      threads.failed ? `${threads.failed} thread(s) could not be completely loaded; export may be incomplete and its checkpoint will not advance.` : ''
+    ].filter(Boolean).join(' ');
     onProgress && onProgress(warning ? `${dedupMap.size} messages collected. ${warning}` : `${dedupMap.size} messages collected.`);
 
-    return { reason, warning, messages: [...dedupMap.values()].sort(
+    return { reason, warning, threadsComplete: !threads.failed, threadsScanned: threads.scanned, messages: [...dedupMap.values()].sort(
       (a, b) => (a.absoluteTimestamp || 0) - (b.absoluteTimestamp || 0)
     ) };
   } finally {
     extractionCache.disconnect();
+    await threads.restore();
     restoreScrollPosition(container, distanceFromBottom, anchor);
   }
+}
+
+function messageNodes(root) {
+  const selector = SEL.deletedMessage ? `${SEL.messageGroups}, ${SEL.deletedMessage}` : SEL.messageGroups;
+  return [...root.querySelectorAll(selector)];
+}
+
+function threadTopic(container) {
+  return container?.closest(SEL.topicContainer)?.getAttribute(SEL.attrs.topicId) || '';
+}
+
+function findThreadView(topic = '') {
+  if (!SEL.threadScroll) return null;
+  return [...document.querySelectorAll(SEL.threadScroll)].find(view =>
+    view.clientHeight > 0 && (!topic || threadTopic(view) === topic)
+  ) || null;
+}
+
+async function waitForThreadCondition(read, signal = null, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    throwIfAborted(signal);
+    const value = read();
+    if (value) return value;
+    await sleep(100, signal);
+  } while (Date.now() < deadline);
+  return null;
+}
+
+function threadSignature(view) {
+  return `${view.scrollHeight}|${messageNodes(view).map(node => node.getAttribute(SEL.attrs.groupId)).join(',')}|${
+    [...view.querySelectorAll(SEL.collapsedMessages)].map(node => node.getAttribute('data-collapsed-count')).join(',')}`;
+}
+
+async function readThreadMessages(view, topic, expectedReplies, signal) {
+  const cache = createExtractionCache(view);
+  const messages = new Map();
+  const collect = () => {
+    for (const msg of extractMessages(cache, view)) {
+      if (msg.threadId === topic) messages.set(msg._dedupKey, msg);
+    }
+  };
+  const accountedFor = () => {
+    const ids = new Set([...messages.values()].map(msg => msg.messageId));
+    return expectedReplies !== null && ids.has(topic) && ids.size - 1 >= expectedReplies;
+  };
+
+  try {
+    // Expand explicit collapsed-message controls as well as traversing the
+    // viewport. Google Chat can hide dozens of replies without a scroll fetch.
+    for (const direction of [-1, 1]) {
+      let idle = 0;
+      for (let step = 0; step < 1000; step++) {
+        throwIfAborted(signal);
+        if (!view.isConnected || threadTopic(view) !== topic) throw new Error('Thread changed during export');
+        collect();
+        const before = threadSignature(view);
+        const collapsed = view.querySelector(SEL.collapsedMessages);
+        if (collapsed) {
+          collapsed.click();
+          const changed = await waitForThreadCondition(() => threadSignature(view) !== before, signal);
+          if (!changed) return { messages: [...messages.values()], complete: false };
+          await sleep(150, signal);
+          idle = 0;
+          continue;
+        }
+        if (accountedFor()) return { messages: [...messages.values()], complete: true };
+
+        const oldTop = view.scrollTop;
+        const maxTop = Math.max(0, view.scrollHeight - view.clientHeight);
+        const nextTop = Math.max(0, Math.min(maxTop, oldTop + direction * Math.max(1, view.clientHeight * 0.75)));
+        const boundary = direction < 0 ? nextTop <= 1 : nextTop >= maxTop - 1;
+        view.scrollTop = nextTop;
+        await waitForThreadCondition(() => threadSignature(view) !== before, signal, boundary ? 600 * (idle + 1) : 150);
+        collect();
+        if (threadSignature(view) !== before) idle = 0;
+        else if (boundary && Math.abs(view.scrollTop - oldTop) <= 1) idle++;
+        if (idle >= 3) break;
+        if (step === 999) return { messages: [...messages.values()], complete: false };
+      }
+    }
+    collect();
+    return { messages: [...messages.values()], complete: expectedReplies === null || accountedFor() };
+  } finally {
+    cache.disconnect();
+  }
+}
+
+function createThreadCollector(main, onProgress, signal) {
+  const visited = new Set();
+  const previous = findThreadView();
+  const previousTopic = previous ? threadTopic(previous) : '';
+  const previousTop = previous?.scrollTop || 0;
+  const initialUrl = typeof location !== 'undefined' ? location.href : '';
+  let lastOpened = '';
+  let failed = 0;
+
+  return {
+    get failed() { return failed; },
+    get scanned() { return visited.size; },
+    async collect() {
+      if (!SEL.threadOpen) return [];
+      const messages = [];
+      const anchor = captureScrollAnchor(main);
+      const distance = Math.max(0, main.scrollHeight - main.clientHeight - main.scrollTop);
+      try {
+        for (const group of messageNodes(main)) {
+          const topic = group.getAttribute(SEL.attrs.groupId);
+          const open = group.querySelector(SEL.threadOpen);
+          if (!topic || !open || visited.has(topic) || !group.isConnected) continue;
+          throwIfAborted(signal);
+          visited.add(topic);
+          const count = open.textContent.match(/^\s*(\d[\d,]*)/);
+          const expected = count ? Number(count[1].replace(/,/g, '')) : null;
+          onProgress?.(`Loading thread ${visited.size}...`);
+          try {
+            lastOpened = topic;
+            open.click();
+            const view = await waitForThreadCondition(() => findThreadView(topic), signal);
+            if (!view) { failed++; continue; }
+            const result = await readThreadMessages(view, topic, expected, signal);
+            messages.push(...result.messages);
+            if (!result.complete) failed++;
+          } catch (error) {
+            if (error.name === 'AbortError') throw error;
+            failed++;
+          }
+        }
+      } finally {
+        restoreScrollPosition(main, distance, anchor);
+      }
+      return messages;
+    },
+    async restore() {
+      if (!lastOpened || (initialUrl && !isSameConversationUrl(initialUrl, location.href))) return;
+      // Leave a thread the user opened during the scan alone.
+      const view = await waitForThreadCondition(() => findThreadView(), null, 500);
+      if (!view || threadTopic(view) !== lastOpened) return;
+      if (previousTopic) {
+        if (threadTopic(view) !== previousTopic) {
+          const parent = messageNodes(main).find(node => node.getAttribute(SEL.attrs.groupId) === previousTopic);
+          const open = parent?.querySelector(SEL.threadOpen);
+          if (!open) return;
+          open.click();
+        }
+        const restored = await waitForThreadCondition(() => findThreadView(previousTopic), null, 1000);
+        if (restored) restored.scrollTop = previousTop;
+      } else {
+        view.closest(SEL.threadPanel)?.querySelector(SEL.threadClose)?.click();
+      }
+    }
+  };
 }
 
 function captureScrollAnchor(container) {
@@ -387,7 +547,7 @@ function waitForHistoryMutation(container, initialHeight, initialOldest, timeout
       if (settled) return;
       settled = true;
       cleanup();
-      resolve(container.scrollHeight !== initialHeight || getOldestTimestamp() !== initialOldest);
+      resolve(container.scrollHeight !== initialHeight || getOldestTimestamp(container) !== initialOldest);
     };
 
     const cancel = () => {
@@ -399,7 +559,7 @@ function waitForHistoryMutation(container, initialHeight, initialOldest, timeout
 
     const observer = new MutationObserver(() => {
       const historyAdvanced = container.scrollHeight !== initialHeight ||
-        getOldestTimestamp() !== initialOldest;
+        getOldestTimestamp(container) !== initialOldest;
       if (!historyAdvanced) return;
       clearTimeout(settleTimer);
       settleTimer = setTimeout(finish, 120);
@@ -421,9 +581,9 @@ function waitForHistoryMutation(container, initialHeight, initialOldest, timeout
   });
 }
 
-function getOldestTimestamp() {
+function getOldestTimestamp(root = document) {
   let oldest = 0;
-  document.querySelectorAll(SEL.absoluteTimestampAttr).forEach(ts => {
+  root.querySelectorAll(SEL.absoluteTimestampAttr).forEach(ts => {
     const value = parseInt(ts.getAttribute(SEL.attrs.absoluteTimestamp), 10) || 0;
     if (value && (!oldest || value < oldest)) oldest = value;
   });
@@ -471,28 +631,37 @@ function createExtractionCache(container) {
   };
 }
 
-function extractMessages(cache = null) {
+function extractMessages(cache = null, root = document) {
   const results = [];
   const seen = new Set();
 
   // Build date separator positions for date association
   const dateSeps = [];
-  document.querySelectorAll(SEL.dateSeparator).forEach(el => {
+  root.querySelectorAll(SEL.dateSeparator).forEach(el => {
     const text = cleanText(el.textContent);
     if (text) dateSeps.push({ text, top: el.getBoundingClientRect().top });
   });
 
-  const groups = document.querySelectorAll(SEL.messageGroups);
+  const groups = messageNodes(root);
   for (const group of groups) {
     const top = group.getBoundingClientRect().top;
     const date = [...dateSeps].reverse().find(sep => sep.top <= top)?.text || dateSeps[0]?.text || '';
-    const msgs = cache ? cache.read(group, date, () => extractFromGroup(group, dateSeps)) : extractFromGroup(group, dateSeps);
+    const deleted = SEL.deletedMessage && group.matches?.(SEL.deletedMessage);
+    const parse = () => deleted ? [{ sender: 'Unknown', timestamp: '', absoluteTimestamp: 0, date,
+      text: `[${cleanText(group.textContent) || 'Message deleted'}]`, media: [], deleted: true }] : extractFromGroup(group, dateSeps);
+    const msgs = cache ? cache.read(group, date, parse) : parse();
     for (let i = 0; i < msgs.length; i++) {
       const msg = msgs[i];
       const hasMedia = msg.media && msg.media.length > 0;
       if (!msg.text && !hasMedia) continue;
 
       const groupId = group.getAttribute(SEL.attrs.groupId) || '';
+      const topic = SEL.topicContainer ? group.closest?.(SEL.topicContainer)?.getAttribute(SEL.attrs.topicId) || '' : '';
+      msg.messageId = groupId;
+      if (topic) {
+        msg.threadId = topic;
+        if (groupId !== topic) msg.parentMessageId = topic;
+      }
       const key = groupId ? `${groupId}/${i}` : `${msg.sender}|${msg.absoluteTimestamp}|${(msg.text || '').slice(0, 80)}`;
       msg._dedupKey = key;
 
@@ -505,7 +674,7 @@ function extractMessages(cache = null) {
 
   // Fallback: try individual message text elements
   if (results.length === 0) {
-    document.querySelectorAll(SEL.messageText).forEach(el => {
+    root.querySelectorAll(SEL.messageText).forEach(el => {
       const text = getCleanText(el);
       if (!text || text.length < 1) return;
       const key = '_|' + text;
@@ -922,7 +1091,7 @@ async function blobToBase64(resp, signal = null) {
 function checkpointScope(href, format, includeMedia) {
   try {
     const url = new URL(href);
-    if (!['chat.google.com', 'mail.google.com'].includes(url.hostname)) return '';
+    if (url.protocol !== 'https:' || !CHAT_HOSTS.includes(url.hostname)) return '';
     const route = `${url.pathname}${url.hash}`;
     // Chat uses both /app/space/ID and direct /u/0/room/ID routes. Installed
     // web apps commonly expose only the latter, while Gmail uses #chat/....
@@ -1020,22 +1189,41 @@ async function messageFingerprint(message) {
 async function selectNewMessages(messages, checkpoint) {
   if (!checkpoint) return messages;
   const known = new Set(checkpoint.fingerprints);
+  const undated = new Set(checkpoint.undatedFingerprints || []);
   const selected = [];
   for (const message of messages) {
     const time = message.absoluteTimestamp;
     // Missing timestamps must never silently discard a message.
-    if (!time || time > checkpoint.timestamp ||
+    if ((!time && (!message.messageId || !undated.has(await messageFingerprint(message)))) || time > checkpoint.timestamp ||
         (time === checkpoint.timestamp && !known.has(await messageFingerprint(message)))) selected.push(message);
   }
   return selected;
 }
 
-async function buildCheckpoint(messages) {
-  const timestamp = messages.reduce((max, m) => Math.max(max, m.absoluteTimestamp || 0), 0);
+async function buildCheckpoint(messages, previous = null) {
+  messages = messages.filter(message => !message.contextOnly);
+  const timestamp = messages.reduce((max, m) => Math.max(max, m.absoluteTimestamp || 0), previous?.timestamp || 0);
   if (!timestamp) return null;
   const boundary = messages.filter(m => m.absoluteTimestamp === timestamp);
-  if (boundary.length > 5000) return null;
-  return { timestamp, fingerprints: await Promise.all(boundary.map(messageFingerprint)) };
+  const fingerprints = [...new Set([
+    ...(previous?.timestamp === timestamp ? previous.fingerprints : []),
+    ...await Promise.all(boundary.map(messageFingerprint))
+  ])];
+  const undatedFingerprints = [...new Set([
+    ...(previous?.undatedFingerprints || []),
+    ...await Promise.all(messages.filter(m => !m.absoluteTimestamp && m.messageId).map(messageFingerprint))
+  ])];
+  if (fingerprints.length > 5000 || undatedFingerprints.length > 5000) return null;
+  return { timestamp, fingerprints, undatedFingerprints };
+}
+
+function includeThreadParents(allMessages, selected) {
+  const ids = new Set(selected.map(message => message.messageId).filter(Boolean));
+  const needed = new Set(selected.map(message => message.parentMessageId).filter(id => id && !ids.has(id)));
+  return [
+    ...allMessages.filter(message => needed.has(message.messageId)).map(message => ({ ...message, contextOnly: true })),
+    ...selected
+  ];
 }
 
 async function contentCheckpointScope(messages, conversationName, format, includeMedia, href = '') {
@@ -1048,7 +1236,7 @@ async function contentCheckpointScope(messages, conversationName, format, includ
   let account = '0';
   try {
     const url = new URL(href || location.href);
-    if (['chat.google.com', 'mail.google.com'].includes(url.hostname)) host = url.hostname;
+    if (CHAT_HOSTS.includes(url.hostname)) host = url.hostname;
     account = url.pathname.match(/\/u\/([^/]+)/)?.[1] || url.searchParams.get('authuser') || '0';
   } catch { /* retain conservative defaults */ }
   const mode = format === 'md' ? 'md' : format === 'txt' ? 'txt' : includeMedia ? 'html-media' : 'html';
@@ -1094,17 +1282,20 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
 
     const initialUrl = typeof location !== 'undefined' ? location.href : '';
     let scope = checkpointScopeFromPage(format, includeMedia, sourceUrl);
-    let checkpointKey = scope ? `gceCheckpoint:${await hashCheckpointValue(scope)}` : '';
+    // Old checkpoints covered only the main timeline. Establish a fresh baseline
+    // before claiming any previously hidden thread replies were exported.
+    let checkpointKey = scope ? `gceCheckpoint:${await hashCheckpointValue(`${scope}|threads-v1`)}` : '';
     let previous = incremental && checkpointKey ? (await chrome.storage.local.get(checkpointKey))[checkpointKey] : null;
-    if (incremental) {
-      loadAll = true;
-      dateFrom = '';
+    if (incremental) { loadAll = true; dateFrom = ''; }
+    if (loadAll) {
       const container = findScrollContainer();
       if (container) {
         originalPosition = { container, distance: Math.max(0, container.scrollHeight - container.clientHeight - container.scrollTop), anchor: captureScrollAnchor(container) };
-        container.scrollTop = container.scrollHeight;
+        container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
         await sleep(600, signal);
       }
+    }
+    if (incremental) {
       showProgress(previous ? 'Loading messages since the previous export...' :
         (checkpointKey ? 'First incremental export: collecting a baseline...' : 'Identifying this web-app conversation from its history...'), 5);
     }
@@ -1131,14 +1322,16 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     if (incremental && !checkpointKey) {
       scope = await contentCheckpointScope(messages, conversationName, format, includeMedia, sourceUrl || initialUrl);
       if (!scope) throw new Error('Cannot create a safe conversation identity because the loaded messages have no timestamps.');
-      checkpointKey = `gceCheckpoint:${await hashCheckpointValue(scope)}`;
+      checkpointKey = `gceCheckpoint:${await hashCheckpointValue(`${scope}|threads-v1`)}`;
       previous = (await chrome.storage.local.get(checkpointKey))[checkpointKey] || null;
     }
     const effectiveDateFromTs = previous?.timestamp || dateFromTs;
+    const allMessages = messages;
     if (effectiveDateFromTs) {
       messages = messages.filter(m => !m.absoluteTimestamp || m.absoluteTimestamp >= effectiveDateFromTs);
     }
     messages = await selectNewMessages(messages, previous);
+    messages = includeThreadParents(allMessages, messages);
     if (previous) history.since = previous.timestamp;
 
     if (!messages || messages.length === 0) {
@@ -1199,10 +1392,10 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     if (initialUrl && !isSameConversationUrl(initialUrl, location.href)) {
       throw new Error('Conversation changed during export. Please retry.');
     }
-    const candidate = checkpointKey && loadAll && !mediaFailed && history.reason !== 'limit' && history.reason !== 'visible-only'
-      ? await buildCheckpoint(messages) : null;
+    const candidate = checkpointKey && loadAll && !mediaFailed && history.reason !== 'limit' && history.reason !== 'visible-only' && history.threadsComplete !== false
+      ? await buildCheckpoint(messages, previous) : null;
     if (mediaFailed) history.warning = `${history.warning || ''} Some attachments failed; the checkpoint will not advance.`.trim();
-    if (incremental && !candidate && !mediaFailed) history.warning = `${history.warning || ''} No safe checkpoint was saved; the next export may repeat messages.`.trim();
+    if (incremental && !candidate && !mediaFailed && !history.warning) history.warning = 'No safe checkpoint was saved; the next export may repeat messages.';
     // Packaging runs in the service worker and cannot be interrupted safely.
     exportController = null;
 
@@ -1210,7 +1403,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     const resp = await chrome.runtime.sendMessage({
       action: 'packageAndDownload',
       format,
-      payload: { conversationName, messages, mediaFiles, exportDate, sourceUrl, history: { reason: history.reason, warning: history.warning, since: history.since }, checkpoint: candidate ? { key: checkpointKey, value: candidate } : null }
+      payload: { conversationName, messages, mediaFiles, exportDate, sourceUrl, history: { reason: history.reason, warning: history.warning, since: history.since, threadsScanned: history.threadsScanned, threadsComplete: history.threadsComplete }, checkpoint: candidate ? { key: checkpointKey, value: candidate } : null }
     });
       if (resp && resp.success) {
         const next = auto ? ' Auto-export: open the next channel.' : '';

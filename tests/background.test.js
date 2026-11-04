@@ -190,6 +190,67 @@ test('triggerDownload converts data URLs to blob URLs in Firefox', async () => {
 });
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: TXT, Markdown, and HTML group replies with their parent context`, async () => {
+    const c = loadBackground(target);
+    const payload = {
+      conversationName: 'Synthetic space', exportDate: '2026-11-03T12:00:00Z',
+      history: { threadsScanned: 1, since: 200 },
+      messages: [
+        { messageId: 'new-reply', threadId: 'parent', parentMessageId: 'parent', sender: 'Bob', absoluteTimestamp: 300, text: 'New answer', media: [] },
+        { messageId: 'parent', threadId: 'parent', sender: 'Alice', absoluteTimestamp: 10, text: 'Original question', contextOnly: true, media: [] },
+        { messageId: 'unrelated', threadId: 'unrelated', sender: 'Carol', absoluteTimestamp: 200, text: 'Another topic', media: [] },
+        { messageId: 'deleted', threadId: 'parent', parentMessageId: 'parent', sender: 'Unknown', text: '[Message deleted by its author]', deleted: true, media: [] }
+      ]
+    };
+    const markdown = c.generateMarkdown(payload);
+    assert.equal((markdown.match(/^## Thread parent$/gm) || []).length, 1);
+    assert.ok(markdown.indexOf('Original question') < markdown.indexOf('New answer'));
+    assert.match(markdown, /- Reply to: parent/);
+    assert.match(markdown, /- Message ID: new-reply/);
+    assert.match(markdown, /- Parent context from earlier history/);
+    assert.match(markdown, /- Threads scanned: 1/);
+    assert.match(markdown, /## Messages\n/);
+    assert.ok(markdown.indexOf('## Messages') > markdown.indexOf('New answer'), 'standalone messages do not become part of the preceding thread');
+    assert.match(markdown, /Message deleted by its author/);
+    const html = c.generateHtml(payload);
+    assert.match(html, /<section class="thread" data-thread-id="parent">/);
+    assert.match(html, /data-message-id="new-reply" data-parent-message-id="parent"/);
+    assert.ok(html.indexOf('Original question') < html.indexOf('New answer'));
+    assert.ok(html.indexOf('</section>') < html.indexOf('Another topic'));
+    assert.match(html, /Parent context from earlier history/);
+    let download;
+    c.chrome.downloads.download = (options, callback) => { download = options; callback(1); };
+    await c.packageTxt(payload);
+    const txt = Buffer.from(download.url.split(',')[1], 'base64').toString();
+    assert.match(txt, /Thread parent/);
+    assert.match(txt, /\[Reply to parent\]/);
+    assert.match(txt, /\[Parent context from earlier history\]/);
+    assert.ok(txt.indexOf('Original question') < txt.indexOf('New answer'));
+    assert.ok(txt.indexOf('End thread') < txt.indexOf('Another topic'));
+  });
+
+  test(`${target}: completed checkpoints retain known undated messages across concurrent downloads`, async () => {
+    const c = loadBackground(target);
+    const key = 'gceCheckpoint:' + 'e'.repeat(64);
+    const fingerprint = 'f'.repeat(64);
+    const checkpoint = (timestamp, undatedFingerprints) => ({ key, value: { timestamp, fingerprints: [], undatedFingerprints } });
+    await c.queueCheckpoint(1, checkpoint(100, [fingerprint]));
+    await c.queueCheckpoint(2, checkpoint(200, []));
+    assert.equal((await c.chrome.storage.local.get(key))[key].undatedFingerprints[0], fingerprint);
+    await c.queueCheckpoint(3, checkpoint(50, ['a'.repeat(64)]));
+    const saved = (await c.chrome.storage.local.get(key))[key];
+    assert.equal(saved.timestamp, 200);
+    assert.equal(saved.undatedFingerprints.length, 2);
+    assert.throws(() => c.queueCheckpoint(4, checkpoint(300, ['invalid hash'])), /Invalid checkpoint/);
+  });
+
+  test(`${target}: tab targeting accepts MCAS Chat but rejects lookalike domains`, async () => {
+    const c = loadBackground(target);
+    assert.equal(await c.resolveTargetTab({ id: 7, url: 'https://chat.google.com.mcas.ms/app/chat/ROOM' }), 7);
+    assert.equal(await c.resolveTargetTab({ id: 8, url: 'https://chat.google.com.example.org/app/chat/ROOM' }), null);
+    assert.equal(await c.resolveTargetTab({ id: 9, url: 'https://chat.google.com.mcas.ms.example.org/app/chat/ROOM' }), null);
+  });
+
   test(`${target}: Markdown export preserves literal text, timestamps, and attachment links`, async () => {
     const c = loadBackground(target);
     const text = '# Not a transcript heading\n\n```js\nconst value = "<script> & café 👋";\n```\n````\n[last line]';

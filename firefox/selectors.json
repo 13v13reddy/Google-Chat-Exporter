@@ -10,6 +10,14 @@
   ],
 
   "messageGroups": "div.nF6pT",
+  "deletedMessage": "div.Ao1xUb[role=\"group\"][data-id]",
+  "mainMessages": ".Bl2pUd",
+  "threadOpen": "div.CYx15d[role=\"button\"]",
+  "threadScroll": ".lFJYcb[jsname=\"sGWpWe\"]",
+  "threadPanel": ".hSo9Ub",
+  "threadClose": ".DaIyce[jsname=\"TvD9Pc\"] button",
+  "collapsedMessages": "[data-collapsed-count][role=\"button\"]",
+  "topicContainer": "[data-topic-id]",
   "messageText": "div.DTp27d[jsname=\"bgckF\"], div.DTp27d.Zc1Emd, div.GDhqjd, div.vdlEi",
   "messageBubble": "div.B8q9Gf",
 
@@ -72,6 +80,7 @@
   "attrs": {
     "absoluteTimestamp": "data-absolute-timestamp",
     "groupId": "data-id",
+    "topicId": "data-topic-id",
     "senderName": "data-name",
     "mediaUrl": "data-media-url",
     "mediaDuration": "data-media-duration-ms",

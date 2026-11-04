@@ -7,6 +7,8 @@ if (typeof importScripts === 'function' && typeof JSZip === 'undefined') {
   importScripts('lib/jszip.min.js');
 }
 const mediaRequests = new Map();
+const CHAT_URL_PATTERNS = ['https://chat.google.com/*', 'https://mail.google.com/*',
+  'https://chat.google.com.mcas.ms/*', 'https://mail.google.com.mcas.ms/*'];
 // Persist pending download/checkpoint associations so worker suspension is safe.
 let checkpointQueue = Promise.resolve();
 function serializeCheckpoint(work) {
@@ -23,11 +25,14 @@ async function reconcileCheckpoint(downloadId) {
   if (download?.state === 'in_progress') return;
   if (download?.state === 'complete') {
     const old = (await chrome.storage.local.get(pending.key))[pending.key];
+    const undatedFingerprints = [...new Set([...(old?.undatedFingerprints || []), ...(pending.value.undatedFingerprints || [])])];
     if (!old || pending.value.timestamp > old.timestamp) {
-      await chrome.storage.local.set({ [pending.key]: pending.value });
+      await chrome.storage.local.set({ [pending.key]: { ...pending.value, undatedFingerprints } });
     } else if (pending.value.timestamp === old.timestamp) {
       const fingerprints = [...new Set([...old.fingerprints, ...pending.value.fingerprints])];
-      await chrome.storage.local.set({ [pending.key]: { ...old, fingerprints } });
+      await chrome.storage.local.set({ [pending.key]: { ...old, fingerprints, undatedFingerprints } });
+    } else if (undatedFingerprints.length !== (old.undatedFingerprints || []).length) {
+      await chrome.storage.local.set({ [pending.key]: { ...old, undatedFingerprints } });
     }
   }
   await chrome.storage.local.remove(pendingKey);
@@ -37,7 +42,10 @@ function queueCheckpoint(downloadId, checkpoint) {
   if (!/^gceCheckpoint:[a-f0-9]{64}$/.test(checkpoint.key) ||
       !Number.isFinite(checkpoint.value?.timestamp) || checkpoint.value.timestamp <= 0 ||
       !Array.isArray(checkpoint.value.fingerprints) ||
-      !checkpoint.value.fingerprints.every(id => /^[a-f0-9]{64}$/.test(id))) {
+      !checkpoint.value.fingerprints.every(id => /^[a-f0-9]{64}$/.test(id)) ||
+      (checkpoint.value.undatedFingerprints !== undefined &&
+        (!Array.isArray(checkpoint.value.undatedFingerprints) ||
+         !checkpoint.value.undatedFingerprints.every(id => /^[a-f0-9]{64}$/.test(id))))) {
     throw new Error('Invalid checkpoint');
   }
   return serializeCheckpoint(async () => {
@@ -69,30 +77,21 @@ chrome.runtime.onInstalled.addListener(() => {
       id: 'export_txt',
       title: '📄 Export Chat as TXT',
       contexts: ['all'],
-      documentUrlPatterns: [
-        'https://chat.google.com/*',
-        'https://mail.google.com/*'
-      ]
+      documentUrlPatterns: CHAT_URL_PATTERNS
     });
 
     chrome.contextMenus.create({
       id: 'export_md',
       title: '📝 Export Chat as Markdown',
       contexts: ['all'],
-      documentUrlPatterns: [
-        'https://chat.google.com/*',
-        'https://mail.google.com/*'
-      ]
+      documentUrlPatterns: CHAT_URL_PATTERNS
     });
 
     chrome.contextMenus.create({
       id: 'export_html',
       title: '🌐 Export Chat as HTML (with media)',
       contexts: ['all'],
-      documentUrlPatterns: [
-        'https://chat.google.com/*',
-        'https://mail.google.com/*'
-      ]
+      documentUrlPatterns: CHAT_URL_PATTERNS
     });
   });
 });
@@ -142,7 +141,7 @@ async function setExportMode(enabled) {
   await sessionStore.set({ [EXPORT_MODE_KEY]: state });
   chrome.action.setBadgeText({ text: enabled ? 'AUTO' : '' }).catch(() => {});
   if (enabled) chrome.action.setBadgeBackgroundColor({ color: '#1a73e8' }).catch(() => {});
-  const tabs = await chrome.tabs.query({ url: ['https://chat.google.com/*', 'https://mail.google.com/*'] });
+  const tabs = await chrome.tabs.query({ url: CHAT_URL_PATTERNS });
   for (const tab of tabs) {
     chrome.tabs.sendMessage(tab.id, { action: 'exportModeChanged', enabled }).catch(() => {});
   }
@@ -333,16 +332,16 @@ async function triggerExport(contextMenuTab, format, overrides = {}) {
 async function resolveTargetTab(contextMenuTab) {
   // Check if the context menu tab itself is a valid chat tab
   if (contextMenuTab && contextMenuTab.url &&
-      contextMenuTab.url.match(/^https:\/\/(chat|mail)\.google\.com/)) {
+      contextMenuTab.url.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) {
     return contextMenuTab.id;
   }
 
   // Query ALL windows (type: 'app' covers PWA windows; type: 'normal' covers browser tabs)
   const allTabs = await chrome.tabs.query({});
-  const chatTab = allTabs.find(t => t.url?.match(/^https:\/\/chat\.google\.com/));
+  const chatTab = allTabs.find(t => t.url?.match(/^https:\/\/chat\.google\.com(?:\.mcas\.ms)?(?:\/|$)/));
   if (chatTab) return chatTab.id;
 
-  const mailTab = allTabs.find(t => t.url?.match(/^https:\/\/mail\.google\.com/));
+  const mailTab = allTabs.find(t => t.url?.match(/^https:\/\/mail\.google\.com(?:\.mcas\.ms)?(?:\/|$)/));
   if (mailTab) return mailTab.id;
 
   return null;
@@ -408,6 +407,29 @@ async function getSettings() {
 
 // ── TXT Packaging ───────────────────────────────────────────
 
+function groupMessagesByThread(messages) {
+  const groups = [];
+  const threads = new Map();
+  for (const msg of messages) {
+    const id = msg.threadId || msg.parentMessageId;
+    let group = id && threads.get(id);
+    if (!group) {
+      group = { id: id || '', messages: [], order: groups.length };
+      groups.push(group);
+      if (id) threads.set(id, group);
+    }
+    group.messages.push(msg);
+  }
+  for (const group of groups) {
+    group.threaded = group.messages.some(msg => msg.parentMessageId);
+    group.messages.sort((a, b) => Number(!!a.parentMessageId) - Number(!!b.parentMessageId) ||
+      (a.absoluteTimestamp && b.absoluteTimestamp ? a.absoluteTimestamp - b.absoluteTimestamp : 0));
+    group.timestamp = group.messages.find(msg => !msg.parentMessageId && msg.absoluteTimestamp)?.absoluteTimestamp ||
+      group.messages.find(msg => msg.absoluteTimestamp)?.absoluteTimestamp || 0;
+  }
+  return groups.sort((a, b) => a.timestamp && b.timestamp ? a.timestamp - b.timestamp : a.order - b.order);
+}
+
 async function packageTxt({ conversationName, messages, exportDate, history }) {
   const name = conversationName || 'Google Chat';
   const line = '─'.repeat(60);
@@ -419,6 +441,7 @@ async function packageTxt({ conversationName, messages, exportDate, history }) {
     `Chat:      ${name}`,
     `Messages:  ${messages.length}`,
     `Exported:  ${new Date(exportDate).toLocaleString()}`,
+    ...(history?.threadsScanned ? [`Threads:   ${history.threadsScanned} scanned`] : []),
     ...(history?.warning ? [`Warning:   ${history.warning}`] : []),
     ...(history?.since ? [`New since: ${new Date(history.since).toISOString()}`] : []),
     '',
@@ -429,28 +452,34 @@ async function packageTxt({ conversationName, messages, exportDate, history }) {
   let body = '';
   let lastDate = '';
 
-  for (const msg of messages) {
-    if (msg.date && msg.date !== lastDate) {
-      body += `\n──────────── ${msg.date} ────────────\n\n`;
-      lastDate = msg.date;
-    }
-
-    body += `[${msg.timestamp || '—'}] ${msg.sender || 'Unknown'}: ${msg.text || ''}`;
-
-    if (msg.media && msg.media.length > 0) {
-      for (const m of msg.media) {
-        const label = {
-          image: `📷 Image: ${m.name || 'image'}`,
-          gif:   `🎞️  GIF: ${m.name || 'sticker'}`,
-          audio: `🎤 Voice message${m.durationMs ? ' (' + fmtDur(m.durationMs) + ')' : ''}`,
-          video: `🎬 Video: ${m.name || 'video'}${m.durationMs ? ' (' + fmtDur(m.durationMs) + ')' : ''}`,
-          file:  `📄 File: ${m.name || 'file'}`
-        }[m.type] || `📎 Attachment: ${m.name || m.type}`;
-        body += `\n  ${label}`;
+  for (const group of groupMessagesByThread(messages)) {
+    if (group.threaded) { body += `\n──────────── Thread ${group.id} ────────────\n`; lastDate = ''; }
+    for (const msg of group.messages) {
+      if (msg.date && msg.date !== lastDate) {
+        body += `\n──────────── ${msg.date} ────────────\n\n`;
+        lastDate = msg.date;
       }
-    }
 
-    body += '\n';
+      if (msg.contextOnly) body += '[Parent context from earlier history]\n';
+      if (msg.parentMessageId) body += `[Reply to ${msg.parentMessageId}]\n`;
+      body += `[${msg.timestamp || '—'}] ${msg.sender || 'Unknown'}: ${msg.text || ''}`;
+
+      if (msg.media && msg.media.length > 0) {
+        for (const m of msg.media) {
+          const label = {
+            image: `📷 Image: ${m.name || 'image'}`,
+            gif:   `🎞️  GIF: ${m.name || 'sticker'}`,
+            audio: `🎤 Voice message${m.durationMs ? ' (' + fmtDur(m.durationMs) + ')' : ''}`,
+            video: `🎬 Video: ${m.name || 'video'}${m.durationMs ? ' (' + fmtDur(m.durationMs) + ')' : ''}`,
+            file:  `📄 File: ${m.name || 'file'}`
+          }[m.type] || `📎 Attachment: ${m.name || m.type}`;
+          body += `\n  ${label}`;
+        }
+      }
+
+      body += '\n';
+    }
+    if (group.threaded) { body += '\n──────────── End thread ────────────\n'; lastDate = ''; }
   }
 
   body += `\n${line}\nEnd of conversation — ${name}\n`;
@@ -478,39 +507,51 @@ function generateMarkdown({ conversationName, messages, exportDate, history }) {
     '',
     `- Messages: ${messages.length}`,
     `- Exported: ${new Date(exportDate).toISOString()}`,
+    ...(history?.threadsScanned ? [`- Threads scanned: ${history.threadsScanned}`] : []),
     ...(history?.since ? [`- New since: ${new Date(history.since).toISOString()}`] : []),
     ''
   ];
   if (history?.warning) lines.push(`> Warning: ${escapeMarkdownLabel(history.warning)}`, '');
 
   let lastDate = '';
-  for (const msg of messages) {
-    if (msg.date && msg.date !== lastDate) {
-      lines.push(`## ${escapeMarkdownLabel(msg.date)}`, '');
-      lastDate = msg.date;
-    }
+  let previousThread = false;
+  for (const group of groupMessagesByThread(messages)) {
+    if (group.threaded) { lines.push(`## Thread ${escapeMarkdownLabel(group.id)}`, ''); lastDate = ''; }
+    else if (previousThread && !group.messages[0]?.date) lines.push('## Messages', '');
+    for (const msg of group.messages) {
+      if (msg.date && msg.date !== lastDate) {
+        lines.push(`${group.threaded ? '###' : '##'} ${escapeMarkdownLabel(msg.date)}`, '');
+        lastDate = msg.date;
+      }
 
-    const absolute = new Date(msg.absoluteTimestamp);
-    const timestamp = msg.absoluteTimestamp && Number.isFinite(absolute.getTime())
-      ? absolute.toISOString() : msg.timestamp || 'Time unknown';
-    lines.push(`### ${escapeMarkdownLabel(msg.sender || 'Unknown')} — ${escapeMarkdownLabel(timestamp)}`, '');
+      const absolute = new Date(msg.absoluteTimestamp);
+      const timestamp = msg.absoluteTimestamp && Number.isFinite(absolute.getTime())
+        ? absolute.toISOString() : msg.timestamp || 'Time unknown';
+      lines.push(`${group.threaded ? '####' : '###'} ${escapeMarkdownLabel(msg.sender || 'Unknown')} — ${escapeMarkdownLabel(timestamp)}`, '');
+      if (msg.messageId) lines.push(`- Message ID: ${escapeMarkdownLabel(msg.messageId)}`);
+      if (msg.parentMessageId) lines.push(`- Reply to: ${escapeMarkdownLabel(msg.parentMessageId)}`);
+      if (msg.contextOnly) lines.push('- Parent context from earlier history');
+      if (msg.messageId || msg.parentMessageId || msg.contextOnly) lines.push('');
 
-    if (msg.text) {
-      // Preserve chat text literally, including HTML and nested code fences.
-      const text = msg.text.replace(/\r\n?/g, '\n');
-      const fenceLength = (text.match(/`+/g) || []).reduce((length, run) => Math.max(length, run.length + 1), 3);
-      const fence = '`'.repeat(fenceLength);
-      lines.push(`${fence}text`, text, fence, '');
-    }
+      if (msg.text) {
+        // Preserve chat text literally, including HTML and nested code fences.
+        const text = msg.text.replace(/\r\n?/g, '\n');
+        const fenceLength = (text.match(/`+/g) || []).reduce((length, run) => Math.max(length, run.length + 1), 3);
+        const fence = '`'.repeat(fenceLength);
+        lines.push(`${fence}text`, text, fence, '');
+      }
 
-    for (const media of msg.media || []) {
-      const type = { image: 'Image', gif: 'GIF', audio: 'Audio', video: 'Video', file: 'File' }[media.type] || 'Attachment';
-      const name = escapeMarkdownLabel(media.name || media.type || 'attachment');
-      const url = safeResourceUrl(media.url);
-      const duration = media.durationMs ? ` (${fmtDur(media.durationMs)})` : '';
-      lines.push(`- ${type}: ${url ? `[${name}](<${url}>)` : `${name} [unavailable]`}${duration}`);
+      for (const media of msg.media || []) {
+        const type = { image: 'Image', gif: 'GIF', audio: 'Audio', video: 'Video', file: 'File' }[media.type] || 'Attachment';
+        const name = escapeMarkdownLabel(media.name || media.type || 'attachment');
+        const url = safeResourceUrl(media.url);
+        const duration = media.durationMs ? ` (${fmtDur(media.durationMs)})` : '';
+        lines.push(`- ${type}: ${url ? `[${name}](<${url}>)` : `${name} [unavailable]`}${duration}`);
+      }
+      if (msg.media?.length) lines.push('');
     }
-    if (msg.media?.length) lines.push('');
+    previousThread = group.threaded;
+    if (group.threaded) lastDate = '';
   }
 
   return lines.join('\n');
@@ -556,50 +597,59 @@ function generateHtml({ conversationName, messages, exportDate, history }) {
   let lastDate = '';
   let lastSender = '';
 
-  for (const msg of messages) {
-    if (msg.date && msg.date !== lastDate) {
-      messagesHtml += `<div class="date-sep"><span>${esc(msg.date)}</span></div>\n`;
-      lastDate = msg.date;
+  for (const group of groupMessagesByThread(messages)) {
+    if (group.threaded) {
+      messagesHtml += `<section class="thread" data-thread-id="${esc(group.id)}"><h2 class="thread-title">Thread ${esc(group.id)}</h2>\n`;
+      lastDate = '';
       lastSender = '';
     }
+    for (const msg of group.messages) {
+      if (msg.date && msg.date !== lastDate) {
+        messagesHtml += `<div class="date-sep"><span>${esc(msg.date)}</span></div>\n`;
+        lastDate = msg.date;
+        lastSender = '';
+      }
 
-    const isSelf = msg.sender === 'You';
-    const cls = isSelf ? 'msg msg-self' : 'msg msg-other';
-    const showHeader = msg.sender !== lastSender;
-    lastSender = msg.sender;
+      const isSelf = msg.sender === 'You';
+      const cls = isSelf ? 'msg msg-self' : 'msg msg-other';
+      const showHeader = msg.sender !== lastSender;
+      lastSender = msg.sender;
 
-    let avatarHtml = '';
-    if (showHeader) {
-      const avatarUrl = safeResourceUrl(msg.avatarUrl);
-      if (avatarUrl) {
-        avatarHtml = `<img class="avatar" src="${esc(avatarUrl)}" alt="${esc(msg.sender)}" loading="lazy">`;
+      let avatarHtml = '';
+      if (showHeader) {
+        const avatarUrl = safeResourceUrl(msg.avatarUrl);
+        if (avatarUrl) {
+          avatarHtml = `<img class="avatar" src="${esc(avatarUrl)}" alt="${esc(msg.sender)}" loading="lazy">`;
+        } else {
+          const initial = (msg.sender || '?').charAt(0).toUpperCase();
+          avatarHtml = `<div class="avatar avatar-initial">${esc(initial)}</div>`;
+        }
       } else {
-        const initial = (msg.sender || '?').charAt(0).toUpperCase();
-        avatarHtml = `<div class="avatar avatar-initial">${esc(initial)}</div>`;
+        avatarHtml = `<div class="avatar-spacer"></div>`;
       }
-    } else {
-      avatarHtml = `<div class="avatar-spacer"></div>`;
-    }
 
-    const senderHtml = showHeader ? `<div class="sender-name">${esc(msg.sender || 'Unknown')}</div>` : '';
-    const timeHtml = msg.timestamp ? `<div class="time">${esc(msg.timestamp)}</div>` : '';
+      const senderHtml = showHeader ? `<div class="sender-name">${esc(msg.sender || 'Unknown')}</div>` : '';
+      const timeHtml = msg.timestamp ? `<div class="time">${esc(msg.timestamp)}</div>` : '';
 
-    let contentHtml = '';
-    if (msg.text) {
-      contentHtml += `<div class="bubble"><div class="text">${formatTextContent(msg.text)}</div>${timeHtml}</div>`;
-    }
-
-    if (msg.media && msg.media.length > 0) {
-      for (const m of msg.media) {
-        contentHtml += `<div class="media-card">${renderMediaHtml(m)}</div>`;
+      let contentHtml = '';
+      if (msg.text) {
+        contentHtml += `<div class="bubble"><div class="text">${formatTextContent(msg.text)}</div>${timeHtml}</div>`;
       }
-    }
 
-    if (!contentHtml) {
-      contentHtml = `<div class="bubble"><div class="text empty">[Empty message]</div>${timeHtml}</div>`;
-    }
+      if (msg.media && msg.media.length > 0) {
+        for (const m of msg.media) {
+          contentHtml += `<div class="media-card">${renderMediaHtml(m)}</div>`;
+        }
+      }
 
-    messagesHtml += `<div class="${cls}">${senderHtml}<div class="msg-row">${avatarHtml}${contentHtml}</div></div>\n`;
+      if (!contentHtml) {
+        contentHtml = `<div class="bubble"><div class="text empty">[Empty message]</div>${timeHtml}</div>`;
+      }
+
+      const context = msg.contextOnly ? '<div class="context-note">Parent context from earlier history</div>' : '';
+      messagesHtml += `<div class="${cls}${msg.parentMessageId ? ' msg-reply' : ''}" data-message-id="${esc(msg.messageId || '')}" data-parent-message-id="${esc(msg.parentMessageId || '')}">${context}${senderHtml}<div class="msg-row">${avatarHtml}${contentHtml}</div></div>\n`;
+    }
+    if (group.threaded) { messagesHtml += '</section>\n'; lastDate = ''; lastSender = ''; }
   }
 
   return `<!DOCTYPE html>
@@ -617,6 +667,7 @@ function generateHtml({ conversationName, messages, exportDate, history }) {
     <div class="header-info">
       <h1>${esc(conversationName)}</h1>
       ${history?.since ? `<p>New since ${esc(new Date(history.since).toISOString())}</p>` : ''}
+      ${history?.threadsScanned ? `<p>${history.threadsScanned} threads scanned</p>` : ''}
       ${history?.warning ? `<p>${esc(history.warning)}</p>` : ''}
       <p>${messages.length} messages &middot; Exported ${new Date(exportDate).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</p>
     </div>
@@ -725,6 +776,10 @@ header{padding:20px 24px;border-bottom:1px solid #dadce0;position:sticky;top:0;b
 header h1{font-size:17px;font-weight:600;color:#202124}
 header p{font-size:12px;color:#5f6368;margin-top:2px}
 .messages{padding:16px 24px;display:flex;flex-direction:column;gap:2px}
+.thread{margin:12px 0;padding:12px;border:1px solid #dadce0;border-radius:12px}
+.thread-title{font-size:12px;font-weight:500;color:#5f6368;overflow-wrap:anywhere}
+.msg-reply{margin-left:12px;padding-left:12px;border-left:2px solid #d2e3fc}
+.context-note{font-size:11px;color:#5f6368;margin-top:8px}
 .date-sep{text-align:center;margin:20px 0 12px}
 .date-sep span{background:#e8eaed;padding:4px 16px;font-size:11px;color:#5f6368;border-radius:16px;font-weight:500;letter-spacing:.3px}
 .msg{display:flex;flex-direction:column;margin-bottom:2px}

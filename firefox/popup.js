@@ -52,7 +52,7 @@ async function detectConversation() {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs[0];
 
-    if (!tab || !tab.url?.match(/^https:\/\/(chat|mail)\.google\.com/)) {
+    if (!tab || !tab.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) {
       setConvStatus(false, 'Not on Google Chat');
       return;
     }
@@ -129,7 +129,7 @@ async function triggerExport() {
       throw new Error('No active tab found.');
     }
 
-    if (!tab.url?.match(/^https:\/\/(chat|mail)\.google\.com/)) {
+    if (!tab.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) {
       throw new Error('Please navigate to Google Chat first.');
     }
 

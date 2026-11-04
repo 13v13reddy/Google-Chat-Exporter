@@ -43,3 +43,15 @@ test('popup has no external font or stylesheet requests in chrome and firefox', 
     assert.doesNotMatch(popup, /<link[^>]+href=["']https?:/i, `${target} popup should not request external stylesheets`);
   }
 });
+
+test('both browser packages allow content scripts and resources on the exact MCAS Chat hosts', () => {
+  for (const target of ['chrome', 'firefox']) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, target, 'manifest.json'), 'utf8'));
+    for (const pattern of ['https://chat.google.com.mcas.ms/*', 'https://mail.google.com.mcas.ms/*']) {
+      assert.ok(manifest.host_permissions.includes(pattern));
+      assert.ok(manifest.content_scripts.some(script => script.matches.includes(pattern)));
+      assert.ok(manifest.web_accessible_resources.some(resource => resource.matches.includes(pattern)));
+    }
+    assert.ok(!manifest.host_permissions.includes('https://*.mcas.ms/*'), 'unrelated corporate-proxied sites are outside the requested permissions');
+  }
+});
