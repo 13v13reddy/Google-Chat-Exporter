@@ -500,6 +500,114 @@ test('export mode tick does not poll background when disabled', async () => {
 });
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: the date filter includes a recent reply to an older parent with labeled context`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    installThreadFixture(c, { replies: [
+      { id: 'old-reply', topic: 'old-parent', time: 20, text: 'Earlier reply', sender: 'Bob' },
+      { id: 'dated-reply', topic: 'old-parent', time: Date.parse('2026-11-03T20:00:00Z'), text: 'Recent reply', sender: 'Carol' }
+    ] });
+    let payload;
+    c.chrome.runtime.sendMessage = async msg => { payload = msg.payload; return { success: true, filename: 'fixture.md' }; };
+    assert.equal(await c.runExport({ format: 'md', dateFrom: '2026-11-03' }), 'done');
+    assert.deepEqual(Array.from(payload.messages, message => message.messageId), ['old-parent', 'dated-reply']);
+    assert.equal(payload.messages[0].contextOnly, true);
+    assert.equal(payload.history.threadsComplete, true);
+  });
+
+  test(`${target}: visible-only exports do not open or expand threads`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const fixture = installThreadFixture(c);
+    let payload;
+    c.chrome.runtime.sendMessage = async msg => { payload = msg.payload; return { success: true, filename: 'fixture.md' }; };
+    assert.equal(await c.runExport({ format: 'md', loadAll: false }), 'done');
+    assert.deepEqual(fixture.actions, []);
+    assert.equal(payload.messages.length, 2);
+    assert.equal(payload.history.reason, 'visible-only');
+    assert.match(payload.history.warning, /currently rendered/);
+    assert.equal(payload.checkpoint, null);
+  });
+
+  test(`${target}: hidden conversation containers cannot displace the visible main list`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const { main } = installThreadFixture(c);
+    const hidden = { clientHeight: 0, scrollHeight: 800 };
+    const query = c.document.querySelectorAll;
+    c.document.querySelector = selector => selector === c.threadSelectors.mainMessages ? hidden : null;
+    c.document.querySelectorAll = selector => selector === c.threadSelectors.mainMessages ? [hidden, main] : query(selector);
+    assert.equal(c.findScrollContainer(), main);
+  });
+
+  test(`${target}: deleted replies retain ordering hints without inventing a timestamp`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    installThreadFixture(c);
+    const history = await c.scrollToLoadAll();
+    const deleted = history.messages.find(message => message.messageId === 'deleted-reply');
+    assert.equal(deleted.absoluteTimestamp, 0);
+    assert.equal(deleted.previousMessageId, 'old-reply');
+    assert.equal(deleted.nextMessageId, 'new-reply');
+  });
+
+  test(`${target}: an unreadable reply count cannot be reported as a verified complete thread`, async () => {
+    for (const label of ['Replies', '1.234 replies', '1 234 replies', '3 réponses']) {
+      const c = loadContent(target);
+      await c.loadSelectors();
+      installThreadFixture(c, { replyLabel: label });
+      const history = await c.scrollToLoadAll();
+      assert.equal(history.messages.length, 5, 'available content is still captured');
+      assert.equal(history.threadsComplete, false, label);
+      assert.match(history.warning, /checkpoint will not advance/);
+    }
+  });
+
+  test(`${target}: an incomplete scan cannot claim there are no new messages`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    const options = {};
+    const fixture = installThreadFixture(c, options);
+    const stored = {};
+    c.chrome.storage.local.get = async key => ({ [key]: stored[key] });
+    let files = 0;
+    c.chrome.runtime.sendMessage = async msg => {
+      files++;
+      stored[msg.payload.checkpoint.key] = msg.payload.checkpoint.value;
+      return { success: true, filename: 'fixture.md' };
+    };
+    const request = { format: 'md', incremental: true, sourceUrl: 'https://chat.google.com/app/chat/ROOM' };
+    assert.equal(await c.runExport(request), 'done');
+    options.stuckExpansion = true;
+    fixture.state.expanded = false;
+    const progress = [];
+    c.showProgress = (text, _percent, state) => progress.push({ text, state });
+    assert.equal(await c.runExport(request), 'error');
+    assert.equal(files, 1, 'no additional file or checkpoint is saved');
+    assert.equal(progress.at(-1).state, 'error');
+    assert.doesNotMatch(progress.at(-1).text, /No new messages/);
+  });
+
+  test(`${target}: changing conversations behind a fixed PWA address prevents packaging`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    c.location = { href: 'https://chat.google.com/u/0/' };
+    let scope = 'chat.google.com|0|chat|first|md';
+    c.checkpointScopeFromPage = () => scope;
+    const fixture = installThreadFixture(c, { onOpen: () => { scope = 'chat.google.com|0|chat|second|md'; } });
+    const errors = [];
+    c.console = { ...console, error: (...args) => errors.push(args) };
+    let files = 0;
+    c.chrome.runtime.sendMessage = async () => { files++; return { success: true, filename: 'fixture.md' }; };
+    const progress = [];
+    c.showProgress = text => progress.push(text);
+    assert.equal(await c.runExport({ format: 'md' }), 'error');
+    assert.equal(files, 0);
+    assert.match(progress.at(-1), /Conversation changed/);
+    assert.equal(errors[0][1].name, 'ConversationChangedError');
+    assert.deepEqual(fixture.actions, ['open-thread'], 'cleanup cannot close or move a thread in the newly selected conversation');
+  });
+
   test(`${target}: history scans older parents, expands replies, and retains deleted placeholders`, async () => {
     const c = loadContent(target);
     await c.loadSelectors();

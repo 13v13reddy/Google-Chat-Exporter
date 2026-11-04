@@ -422,8 +422,17 @@ function groupMessagesByThread(messages) {
   }
   for (const group of groups) {
     group.threaded = group.messages.some(msg => msg.parentMessageId);
+    const undatedReplies = group.messages.filter(msg => msg.parentMessageId && !msg.absoluteTimestamp);
+    group.messages = group.messages.filter(msg => !msg.parentMessageId || msg.absoluteTimestamp);
     group.messages.sort((a, b) => Number(!!a.parentMessageId) - Number(!!b.parentMessageId) ||
       (a.absoluteTimestamp && b.absoluteTimestamp ? a.absoluteTimestamp - b.absoluteTimestamp : 0));
+    const parentCount = group.messages.filter(msg => !msg.parentMessageId).length;
+    for (const msg of undatedReplies) {
+      const next = msg.nextMessageId ? group.messages.findIndex(row => row.messageId === msg.nextMessageId) : -1;
+      const previous = msg.previousMessageId ? group.messages.map(row => row.messageId).lastIndexOf(msg.previousMessageId) : -1;
+      const position = next >= 0 ? next : previous >= 0 ? previous + 1 : group.messages.length;
+      group.messages.splice(Math.max(parentCount, position), 0, msg);
+    }
     group.timestamp = group.messages.find(msg => !msg.parentMessageId && msg.absoluteTimestamp)?.absoluteTimestamp ||
       group.messages.find(msg => msg.absoluteTimestamp)?.absoluteTimestamp || 0;
   }

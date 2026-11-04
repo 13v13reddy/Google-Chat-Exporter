@@ -39,7 +39,7 @@ function installThreadFixture(context, options = {}) {
     return message;
   };
   const open = {
-    get textContent() { return `${replyData.length} replies`; },
+    get textContent() { return options.replyLabel || `${replyData.length} replies`; },
     click() { actions.push('open-thread'); state.active = 'old-parent'; options.onOpen?.(); }
   };
   const expand = {
@@ -83,7 +83,8 @@ function installThreadFixture(context, options = {}) {
   context.threadSelectors = selectors;
   require('node:vm').runInContext('SEL = this.threadSelectors', context);
   context.document.querySelector = selector => selector === selectors.mainMessages ? main : null;
-  context.document.querySelectorAll = selector => selector === selectors.threadScroll && state.active ? [panel] : queryMessages(mainMessages(), selector);
+  context.document.querySelectorAll = selector => selector === selectors.mainMessages ? [main] :
+    selector === selectors.threadScroll && state.active ? [panel] : queryMessages(mainMessages(), selector);
   context.sleep = async (_ms, signal) => context.throwIfAborted(signal);
   context.waitForHistoryMutation = async () => false;
   context.waitForThreadCondition = async (read, signal) => { context.throwIfAborted(signal); return read(); };

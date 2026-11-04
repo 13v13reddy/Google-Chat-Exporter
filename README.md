@@ -75,6 +75,7 @@ Install directly from your browser's official store:
 ## 🛠️ Development & Building
 
 - **Run Tests:** `npm test`
+- **Coverage and Manual Checks:** [Testing guide](TESTING.md). Automated tests use synthetic DOM/browser APIs; passing them does not replace installed-extension checks on each supported browser and layout.
 - **Run Benchmarks:** `npm run benchmark`
 - **Build Extension Packages:**
   - `npm run build` (builds both Chrome and Firefox ZIP archives in `dist/`)
@@ -101,6 +102,8 @@ Install directly from your browser's official store:
 Each incremental run creates a new file. Keep earlier files to retain the complete archive. Checkpoints are local to the browser profile and advance only after Chrome reports a completed download.
 
 Thread loading depends on Google Chat's current DOM and reply counts. If a thread cannot be opened, collapsed replies remain, or fewer replies are captured than expected, the export carries an incomplete-history warning and its checkpoint does not advance. Deleted placeholders have no invented timestamp or recovered content.
+
+Reply counts must be readable before a thread can be verified as complete. Unrecognized labels or number formats produce an incomplete-history warning and leave the checkpoint unchanged. If an incomplete scan finds no exportable messages, it reports an error instead of claiming there are no new messages.
 
 Thread-aware exports establish a new incremental baseline: checkpoints made before thread support cannot prove that hidden replies were captured. Later incremental exports rescan older threads, retain parent context for new replies, and remember already exported deletion placeholders.
 

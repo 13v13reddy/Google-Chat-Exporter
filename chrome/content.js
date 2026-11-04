@@ -241,16 +241,16 @@ function hideProgress() {
 // ── Scroll to Load All Messages ─────────────────────────────
 
 function findScrollContainer() {
-  const main = SEL.mainMessages && document.querySelector(SEL.mainMessages);
+  const main = SEL.mainMessages && [...document.querySelectorAll(SEL.mainMessages)].find(el => el.clientHeight > 0);
   if (main) return main;
   for (const sel of SEL.scrollContainers) {
-    const el = document.querySelector(sel);
-    if (el && el.scrollHeight > el.clientHeight) return el;
+    const el = [...document.querySelectorAll(sel)].find(el => el.clientHeight > 0 && el.scrollHeight > el.clientHeight);
+    if (el) return el;
   }
   // Dynamic fallback: find the tallest scrollable div
   let best = null, bestH = 0;
   for (const el of document.querySelectorAll(SEL.fallbackScrollable)) {
-    if (el.scrollHeight > el.clientHeight + 100 && el.scrollHeight > bestH) {
+    if (el.clientHeight > 0 && el.scrollHeight > el.clientHeight + 100 && el.scrollHeight > bestH) {
       const style = getComputedStyle(el);
       if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
         best = el;
@@ -261,7 +261,7 @@ function findScrollContainer() {
   return best;
 }
 
-async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null) {
+async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null, isCurrent = null) {
   const container = findScrollContainer();
   if (!container) {
     onProgress && onProgress('No scroll container found — exporting visible messages only');
@@ -274,11 +274,12 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null) {
   );
   const anchor = captureScrollAnchor(container);
   const extractionCache = createExtractionCache(container);
-  const threads = createThreadCollector(container, onProgress, signal);
+  const threads = createThreadCollector(container, onProgress, signal, isCurrent);
   let reason = 'limit';
 
   const dedupMap = new Map();
   const collectCurrent = async () => {
+    ensureCurrentConversation(isCurrent);
     for (const msg of [...extractMessages(extractionCache, container), ...await threads.collect()]) {
       const key = msg._dedupKey || `${msg.sender}|${msg.absoluteTimestamp}|${(msg.text || '').slice(0, 80)}`;
       dedupMap.set(key, msg);
@@ -298,6 +299,7 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null) {
 
     while (batches < MAX_BATCHES) {
       throwIfAborted(signal);
+      ensureCurrentConversation(isCurrent);
       batches++;
 
       // Old parent messages can have new replies. Scan every parent and apply
@@ -343,14 +345,24 @@ async function scrollToLoadAll(onProgress, dateFromTs = 0, signal = null) {
     ) };
   } finally {
     extractionCache.disconnect();
-    await threads.restore();
-    restoreScrollPosition(container, distanceFromBottom, anchor);
+    if (!isCurrent || isCurrent()) {
+      await threads.restore();
+      restoreScrollPosition(container, distanceFromBottom, anchor);
+    }
   }
 }
 
 function messageNodes(root) {
   const selector = SEL.deletedMessage ? `${SEL.messageGroups}, ${SEL.deletedMessage}` : SEL.messageGroups;
   return [...root.querySelectorAll(selector)];
+}
+
+function ensureCurrentConversation(isCurrent) {
+  if (isCurrent && !isCurrent()) {
+    const error = new Error('Conversation changed during export. Please retry.');
+    error.name = 'ConversationChangedError';
+    throw error;
+  }
 }
 
 function threadTopic(container) {
@@ -380,10 +392,11 @@ function threadSignature(view) {
     [...view.querySelectorAll(SEL.collapsedMessages)].map(node => node.getAttribute('data-collapsed-count')).join(',')}`;
 }
 
-async function readThreadMessages(view, topic, expectedReplies, signal) {
+async function readThreadMessages(view, topic, expectedReplies, signal, isCurrent = null) {
   const cache = createExtractionCache(view);
   const messages = new Map();
   const collect = () => {
+    ensureCurrentConversation(isCurrent);
     for (const msg of extractMessages(cache, view)) {
       if (msg.threadId === topic) messages.set(msg._dedupKey, msg);
     }
@@ -428,13 +441,13 @@ async function readThreadMessages(view, topic, expectedReplies, signal) {
       }
     }
     collect();
-    return { messages: [...messages.values()], complete: expectedReplies === null || accountedFor() };
+    return { messages: [...messages.values()], complete: accountedFor() };
   } finally {
     cache.disconnect();
   }
 }
 
-function createThreadCollector(main, onProgress, signal) {
+function createThreadCollector(main, onProgress, signal, isCurrent = null) {
   const visited = new Set();
   const previous = findThreadView();
   const previousTopic = previous ? threadTopic(previous) : '';
@@ -457,8 +470,11 @@ function createThreadCollector(main, onProgress, signal) {
           const open = group.querySelector(SEL.threadOpen);
           if (!topic || !open || visited.has(topic) || !group.isConnected) continue;
           throwIfAborted(signal);
+          ensureCurrentConversation(isCurrent);
           visited.add(topic);
-          const count = open.textContent.match(/^\s*(\d[\d,]*)/);
+          // Do not mistake a localized/abbreviated count (e.g. 1.234 or 1K)
+          // for one reply and incorrectly certify the thread as complete.
+          const count = open.textContent.match(/^\s*(\d+|[1-9]\d{0,2}(?:,\d{3})+)\s+repl(?:y|ies)\b/i);
           const expected = count ? Number(count[1].replace(/,/g, '')) : null;
           onProgress?.(`Loading thread ${visited.size}...`);
           try {
@@ -466,21 +482,21 @@ function createThreadCollector(main, onProgress, signal) {
             open.click();
             const view = await waitForThreadCondition(() => findThreadView(topic), signal);
             if (!view) { failed++; continue; }
-            const result = await readThreadMessages(view, topic, expected, signal);
+            const result = await readThreadMessages(view, topic, expected, signal, isCurrent);
             messages.push(...result.messages);
             if (!result.complete) failed++;
           } catch (error) {
-            if (error.name === 'AbortError') throw error;
+            if (['AbortError', 'ConversationChangedError'].includes(error.name)) throw error;
             failed++;
           }
         }
       } finally {
-        restoreScrollPosition(main, distance, anchor);
+        if (!isCurrent || isCurrent()) restoreScrollPosition(main, distance, anchor);
       }
       return messages;
     },
     async restore() {
-      if (!lastOpened || (initialUrl && !isSameConversationUrl(initialUrl, location.href))) return;
+      if (!lastOpened || (isCurrent && !isCurrent()) || (initialUrl && !isSameConversationUrl(initialUrl, location.href))) return;
       // Leave a thread the user opened during the scan alone.
       const view = await waitForThreadCondition(() => findThreadView(), null, 500);
       if (!view || threadTopic(view) !== lastOpened) return;
@@ -643,7 +659,7 @@ function extractMessages(cache = null, root = document) {
   });
 
   const groups = messageNodes(root);
-  for (const group of groups) {
+  for (const [groupIndex, group] of groups.entries()) {
     const top = group.getBoundingClientRect().top;
     const date = [...dateSeps].reverse().find(sep => sep.top <= top)?.text || dateSeps[0]?.text || '';
     const deleted = SEL.deletedMessage && group.matches?.(SEL.deletedMessage);
@@ -660,7 +676,17 @@ function extractMessages(cache = null, root = document) {
       msg.messageId = groupId;
       if (topic) {
         msg.threadId = topic;
-        if (groupId !== topic) msg.parentMessageId = topic;
+        if (groupId !== topic) {
+          msg.parentMessageId = topic;
+          if (!msg.absoluteTimestamp) {
+            // Deleted replies have no timestamp. Keep their actual neighbors
+            // so rendering can preserve their position without inventing one.
+            [msg.previousMessageId, msg.nextMessageId] = [groups[groupIndex - 1], groups[groupIndex + 1]].map(node =>
+              node?.closest?.(SEL.topicContainer)?.getAttribute(SEL.attrs.topicId) === topic
+                ? node.getAttribute(SEL.attrs.groupId) || '' : ''
+            );
+          }
+        }
       }
       const key = groupId ? `${groupId}/${i}` : `${msg.sender}|${msg.absoluteTimestamp}|${(msg.text || '').slice(0, 80)}`;
       msg._dedupKey = key;
@@ -1266,6 +1292,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
   exportController = controller;
   const { signal } = controller;
   let originalPosition = null;
+  let conversationMatches = () => true;
 
   try {
     await loadSelectors();
@@ -1281,7 +1308,12 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     showProgress('⏳ Preparing export...', 2);
 
     const initialUrl = typeof location !== 'undefined' ? location.href : '';
-    let scope = checkpointScopeFromPage(format, includeMedia, sourceUrl);
+    const initialPageScope = checkpointScopeFromPage(format, includeMedia);
+    const initialName = getConversationName();
+    conversationMatches = () => (!initialUrl || isSameConversationUrl(initialUrl, location.href)) &&
+      (!initialPageScope || initialPageScope === checkpointScopeFromPage(format, includeMedia)) &&
+      (!!initialPageScope || !initialName || initialName === getConversationName());
+    let scope = initialPageScope || checkpointScopeFromPage(format, includeMedia, sourceUrl);
     // Old checkpoints covered only the main timeline. Establish a fresh baseline
     // before claiming any previously hidden thread replies were exported.
     let checkpointKey = scope ? `gceCheckpoint:${await hashCheckpointValue(`${scope}|threads-v1`)}` : '';
@@ -1308,7 +1340,8 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
       history = await scrollToLoadAll(
         (text) => showProgress(text, 15),
         dateFromTs,
-        signal
+        signal,
+        conversationMatches
       );
       messages = history.messages;
       await sleep(200, signal);
@@ -1316,6 +1349,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
 
     showProgress('📝 Extracting messages...', 30);
     await sleep(100, signal);
+    ensureCurrentConversation(conversationMatches);
 
     if (!messages) messages = extractMessages();
     const conversationName = getConversationName() || 'Google Chat';
@@ -1335,6 +1369,11 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     if (previous) history.since = previous.timestamp;
 
     if (!messages || messages.length === 0) {
+      if (loadAll && (history.threadsComplete === false || ['limit', 'visible-only'].includes(history.reason))) {
+        showProgress(`History scan was incomplete. No export was saved. ${history.warning || 'Please retry.'}`, 0, 'error');
+        setTimeout(hideProgress, 6000);
+        return 'error';
+      }
       showProgress(previous ? `No new messages found since the previous export. ${history.warning || ''}` : 'No messages found. Try opening a conversation first.', 100, previous ? 'done' : 'error');
       setTimeout(hideProgress, 5000);
       exportInProgress = false;
@@ -1389,9 +1428,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
 
     showProgress('📦 Packaging...', 88);
     await sleep(200, signal);
-    if (initialUrl && !isSameConversationUrl(initialUrl, location.href)) {
-      throw new Error('Conversation changed during export. Please retry.');
-    }
+    ensureCurrentConversation(conversationMatches);
     const candidate = checkpointKey && loadAll && !mediaFailed && history.reason !== 'limit' && history.reason !== 'visible-only' && history.threadsComplete !== false
       ? await buildCheckpoint(messages, previous) : null;
     if (mediaFailed) history.warning = `${history.warning || ''} Some attachments failed; the checkpoint will not advance.`.trim();
@@ -1429,7 +1466,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     setTimeout(hideProgress, 6000);
     return 'error';
   } finally {
-    if (originalPosition) restoreScrollPosition(originalPosition.container, originalPosition.distance, originalPosition.anchor);
+    if (originalPosition && conversationMatches()) restoreScrollPosition(originalPosition.container, originalPosition.distance, originalPosition.anchor);
     exportInProgress = false;
     exportController = null;
   }

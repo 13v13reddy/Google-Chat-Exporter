@@ -6,7 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadBackground(target = 'chrome') {
+function loadBackground(target = 'chrome', withZip = false) {
   const event = () => ({ addListener(fn) { this.listener = fn; } });
   const stored = {};
   const session = {};
@@ -50,6 +50,10 @@ function loadBackground(target = 'chrome') {
     setTimeout,
     unescape
   });
+  if (withZip) {
+    vm.runInContext('self = globalThis', context);
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, 'lib', 'jszip.min.js'), 'utf8'), context);
+  }
   const filename = path.join(__dirname, '..', target, 'background.js');
   vm.runInContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   return context;
@@ -190,6 +194,64 @@ test('triggerDownload converts data URLs to blob URLs in Firefox', async () => {
 });
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: all download formats preserve UTF-8 and HTML ZIPs contain real bundled attachments`, async () => {
+    const c = loadBackground(target, true);
+    if (target === 'firefox') c.navigator.userAgent = 'Mozilla/5.0 Firefox/140.0';
+    const payload = { conversationName: 'Synthetic space', exportDate: '2026-11-03T12:00:00Z', messages: [
+      { messageId: 'parent', threadId: 'parent', sender: 'Alice', absoluteTimestamp: 100, text: 'Question — café 👋', media: [] },
+      { messageId: 'reply', threadId: 'parent', parentMessageId: 'parent', sender: 'Bob', absoluteTimestamp: 200, text: 'Answer — こんにちは', media: [
+        { type: 'file', name: 'note.txt', url: 'https://example.com/note.txt', _localPath: 'media/1_note.txt', mimeType: 'text/plain' }
+      ] }
+    ], mediaFiles: [{ path: 'media/1_note.txt', base64: Buffer.from('Attachment — résumé').toString('base64') }] };
+    for (const format of ['txt', 'md', 'html']) {
+      let download;
+      c.chrome.downloads.download = (options, callback) => { download = options; callback(42); };
+      const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'packageAndDownload', format, payload }, {}, resolve));
+      assert.equal(response.success, true, response.error);
+      let bytes;
+      if (target === 'firefox') {
+        assert.ok(download.url.startsWith('blob:'));
+        const resource = await fetch(download.url);
+        assert.equal(resource.status, 200);
+        bytes = new Uint8Array(await resource.arrayBuffer());
+        URL.revokeObjectURL(download.url);
+      } else {
+        assert.ok(download.url.startsWith('data:'));
+        bytes = Buffer.from(download.url.split(',')[1], 'base64');
+      }
+      if (format === 'html') {
+        const archive = await c.JSZip.loadAsync(bytes);
+        const html = await archive.file('index.html').async('string');
+        assert.match(html, /Question — café 👋/);
+        assert.match(html, /Answer — こんにちは/);
+        assert.match(html, /data-parent-message-id="parent"/);
+        assert.match(html, /href="media\/1_note.txt"/);
+        assert.ok((await archive.file('styles.css').async('string')).includes('.thread'));
+        assert.equal(await archive.file('media/1_note.txt').async('string'), 'Attachment — résumé');
+        assert.match(response.filename, /\.zip$/);
+      } else {
+        const text = Buffer.from(bytes).toString('utf8');
+        assert.match(text, /Question — café 👋/);
+        assert.match(text, /Answer — こんにちは/);
+        assert.match(response.filename, format === 'md' ? /\.md$/ : /\.txt$/);
+      }
+    }
+  });
+
+  test(`${target}: exported thread text keeps an untimestamped deletion between its actual neighbors`, () => {
+    const c = loadBackground(target);
+    const payload = { conversationName: 'Synthetic space', exportDate: '2026-11-03T12:00:00Z', messages: [
+      { messageId: 'deleted', threadId: 'parent', parentMessageId: 'parent', previousMessageId: 'earlier', nextMessageId: 'later', absoluteTimestamp: 0, text: '[Message deleted by its author]' },
+      { messageId: 'parent', threadId: 'parent', absoluteTimestamp: 10, text: 'Original question' },
+      { messageId: 'earlier', threadId: 'parent', parentMessageId: 'parent', absoluteTimestamp: 20, text: 'Earlier reply' },
+      { messageId: 'later', threadId: 'parent', parentMessageId: 'parent', absoluteTimestamp: 30, text: 'Later reply' }
+    ] };
+    for (const text of [c.generateMarkdown(payload), c.generateHtml(payload)]) {
+      assert.ok(text.indexOf('Earlier reply') < text.indexOf('[Message deleted by its author]'));
+      assert.ok(text.indexOf('[Message deleted by its author]') < text.indexOf('Later reply'));
+    }
+  });
+
   test(`${target}: TXT, Markdown, and HTML group replies with their parent context`, async () => {
     const c = loadBackground(target);
     const payload = {
@@ -339,4 +401,22 @@ for (const target of ['chrome', 'firefox']) {
     assert.deepEqual(calls, [{ tab, format: 'md' }]);
   });
 }
+
+test('a 10,000-message Markdown download preserves every message and Unicode text', async () => {
+  const c = loadBackground();
+  const messages = Array.from({ length: 10000 }, (_, index) => {
+    const parent = `message-${Math.floor(index / 10) * 10}`;
+    return { messageId: `message-${index}`, threadId: parent, parentMessageId: index % 10 ? parent : '',
+      sender: 'Synthetic sender', absoluteTimestamp: 1793700000000 + index,
+      text: `Unique body ${index}: café こんにちは 👋\n` + 'Literal code and text. '.repeat(12), media: [] };
+  });
+  let download;
+  c.chrome.downloads.download = (options, callback) => { download = options; callback(1); };
+  await c.packageMarkdown({ conversationName: 'Synthetic large export', exportDate: '2026-11-03T12:00:00Z', messages });
+  const text = Buffer.from(download.url.split(',')[1], 'base64').toString('utf8');
+  assert.equal((text.match(/^- Message ID: /gm) || []).length, 10000);
+  assert.equal((text.match(/^## Thread /gm) || []).length, 1000);
+  assert.match(text, /Unique body 0: café こんにちは 👋/);
+  assert.match(text, /Unique body 9999: café こんにちは 👋/);
+});
 
