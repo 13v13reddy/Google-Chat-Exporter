@@ -3,8 +3,10 @@
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { checkSources } = require('./check-sources');
 
 const root = path.join(__dirname, '..');
+checkSources(root);
 const dist = path.join(root, 'dist');
 const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version;
 

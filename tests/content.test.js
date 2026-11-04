@@ -64,7 +64,7 @@ function loadContent(target = 'chrome', { includeTheme = true } = {}) {
 function installProgressDom(context) {
   const hosts = [];
   class Element {
-    constructor() { this.style = {}; this.children = []; this.attributes = {}; this.slots = new Map(); }
+    constructor() { this.style = {}; this.children = []; this.attributes = {}; this.slots = new Map(); this.isConnected = false; }
     appendChild(element) { this.children.push(element); return element; }
     addEventListener() {}
     getAttribute(name) { return this.attributes[name] ?? null; }
@@ -72,11 +72,11 @@ function installProgressDom(context) {
       if (!this.slots.has(selector)) this.slots.set(selector, new Element());
       return this.slots.get(selector);
     }
-    remove() { this.removed = true; }
+    remove() { this.removed = true; this.isConnected = false; }
     setAttribute(name, value) { this.attributes[name] = String(value); }
   }
   context.document.createElement = () => new Element();
-  context.document.documentElement = { appendChild(element) { hosts.push(element); return element; } };
+  context.document.documentElement = { appendChild(element) { element.isConnected = true; hosts.push(element); return element; } };
   return hosts;
 }
 
@@ -90,7 +90,64 @@ for (const target of ['chrome', 'firefox']) {
     assert.equal(response.alive, true);
     assert.equal(response.themeReady, false);
     assert.equal(response.resultHostReady, true);
-    assert.equal(response.frameId, 5);
+    assert.equal(response.frameId, undefined, 'the sender frame is not this content script’s frame');
+  });
+
+  test(`${target}: Gmail’s generic main region is not detected as a Chat conversation`, async () => {
+    const c = loadContent(target);
+    await c.loadSelectors();
+    c.document.querySelector = selector => selector === '[role="main"]' ? {} : null;
+    vm.runInContext('SEL.scrollContainers = [\'[role="main"]\']', c);
+    assert.equal(c.isInChatFrame(), false);
+  });
+
+  test(`${target}: a progress host removed by a page redraw is reattached on its next update`, () => {
+    const c = loadContent(target);
+    const hosts = installProgressDom(c);
+    c.showProgress('Loading history', 15);
+    const host = hosts[0];
+    host.remove();
+    c.showProgress('Loading a thread', 15);
+    assert.equal(host.isConnected, true);
+    assert.equal(hosts.at(-1), host, 'reattaches the existing card without duplicate event handlers');
+  });
+
+  test(`${target}: a saved export stays successful when its result notification cannot render`, async () => {
+    const c = loadContent(target);
+    installProgressDom(c);
+    c.isInChatFrame = () => true;
+    c.getConversationName = () => 'Fixture';
+    c.extractMessages = () => [{ text: 'hello', media: [] }];
+    c.mountExportResult = () => { throw new Error('Notification unavailable'); };
+    c.console = { ...console, warn() {} };
+    const states = [];
+    c.chrome.runtime.sendMessage = async message => {
+      if (message.action === 'exportStateUpdate') states.push(message.state);
+      return message.action === 'packageAndDownload' ? { success: true, filename: 'fixture.md', downloadId: 42 } : {};
+    };
+    assert.equal(await c.runExport({ format: 'md', loadAll: false }), 'done');
+    assert.equal(states.at(-1), 'done');
+    assert.ok(!states.includes('error'));
+  });
+
+  test(`${target}: failure to render the first notification cannot prevent packaging or status delivery`, async () => {
+    const c = loadContent(target);
+    c.console = { ...console, warn() {} };
+    c.document.createElement = () => { throw new Error('Page rejected notification'); };
+    c.isInChatFrame = () => true;
+    c.getConversationName = () => 'Fixture';
+    c.extractMessages = () => [{ text: 'hello', media: [] }];
+    let packages = 0;
+    const states = [];
+    c.chrome.runtime.sendMessage = async message => {
+      if (message.action === 'exportStateUpdate') states.push(message.state);
+      if (message.action !== 'packageAndDownload') return {};
+      packages++;
+      return { success: true, filename: 'fixture.md', downloadId: 42 };
+    };
+    assert.equal(await c.runExport({ format: 'md', loadAll: false }), 'done');
+    assert.equal(packages, 1);
+    assert.equal(states.at(-1), 'done');
   });
 }
 

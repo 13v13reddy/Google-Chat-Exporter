@@ -75,6 +75,8 @@ Install directly from your browser's official store:
 
 ## 🛠️ Development & Building
 
+Chrome and Firefox share source files and assets; only their manifests differ. Keep shared files identical in both folders. `npm run check:sources` checks this, and every package build runs the same check before creating archives. Popup and saved-result styles live in `ui.css`.
+
 - **Run Tests:** `npm test`
 - **Coverage and Manual Checks:** [Testing guide](TESTING.md). Automated tests use synthetic DOM/browser APIs; passing them does not replace installed-extension checks on each supported browser and layout.
 - **Run Benchmarks:** `npm run benchmark`
@@ -105,13 +107,16 @@ Status metadata for up to 20 recent finished exports is kept locally, along with
 
 ### Export options
 
-- **Dark mode** applies to the extension popup, progress notifications, and saved-export cards. The choice is remembered locally and updates open notifications immediately. Before choosing, the extension follows your system appearance.
-- **Load Full History** traverses the conversation and loads the replies in each discovered thread. Turn it off to export only currently rendered messages, without opening threads or expanding collapsed replies.
-- **Messages Since** filters messages and replies after loading history. Older parent messages can have new replies, so the exporter still checks their threads. An older parent needed to explain an exported reply is labeled as context.
-- **New Since Last Export** saves a per-conversation checkpoint and exports only newer messages on subsequent runs. The first run establishes a baseline; TXT, Markdown, HTML, and HTML-with-media modes use separate checkpoints.
-- **Include Media** downloads attachments when HTML is selected.
+- **Messages → All messages and replies** loads history and the replies in each discovered thread.
+- **Since a date** reveals a date input and filters messages and replies after loading history. Older parents can have new replies, so their threads are still checked. A parent needed to explain an exported reply is labeled as context.
+- **New since last export** saves a per-conversation checkpoint and exports only newer messages on subsequent runs. The first run establishes a baseline; TXT, Markdown, HTML, and HTML-with-media modes use separate checkpoints.
+- **Loaded messages only** exports the rendered timeline without opening threads. **Loaded since a date** also filters that rendered timeline by date.
+- **Download attachments** is available for HTML. Text and Markdown retain attachment links.
+- **Options** contains auto-export and dark mode. Dark mode applies to the popup and export notifications, remembers the choice locally, and follows the system appearance until a choice is saved.
 
 Each incremental run creates a new file. Keep earlier files to retain the complete archive. Checkpoints are local to the browser profile and advance only after Chrome reports a completed download.
+
+After updating the extension, refresh existing Chat tabs. Startup checks the content-script protocol and reports an explicit refresh error when a tab still has older code.
 
 Thread loading depends on Google Chat's current DOM and reply counts. If a thread cannot be opened, collapsed replies remain, or fewer replies are captured than expected, the export carries an incomplete-history warning and its checkpoint does not advance. Deleted placeholders have no invented timestamp or recovered content.
 

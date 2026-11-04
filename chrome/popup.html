@@ -4,422 +4,68 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Google Chat Exporter</title>
-  <style>
-    :root {
-      color-scheme: light;
-      --canvas: #f5f5f2;
-      --surface: #fff;
-      --surface-raised: #fbfbf9;
-      --hover: #f0f1ed;
-      --line: #e2e3de;
-      --line-strong: #c9cbc4;
-      --ink: #292b27;
-      --muted: #70736d;
-      --faint: #92958e;
-      --accent: #356b83;
-      --accent-hover: #2a566a;
-      --accent-wash: #e8f0f2;
-      --success: #4b6b52;
-      --danger: #a64d46;
-      --danger-wash: #f7ecea;
-      --radius: 8px;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: var(--ink);
-      background: var(--canvas);
-    }
-    :root[data-gce-theme="dark"] {
-      color-scheme: dark;
-      --canvas: #1d201e;
-      --surface: #252825;
-      --surface-raised: #292d2a;
-      --hover: #303530;
-      --line: #3b403b;
-      --line-strong: #565d56;
-      --ink: #e7eae5;
-      --muted: #adb4ac;
-      --faint: #8e978e;
-      --accent: #a6c9d8;
-      --accent-hover: #c0dce7;
-      --accent-wash: #2a3a40;
-      --success: #a6c5a8;
-      --danger: #e6a39b;
-      --danger-wash: #422e2c;
-    }
-    *, *::before, *::after { box-sizing: border-box; }
-    body {
-      width: 360px;
-      max-height: 600px;
-      margin: 0;
-      overflow-x: hidden;
-      overflow-y: auto;
-      color: var(--ink);
-      background: var(--canvas);
-      font: 13px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      -webkit-font-smoothing: antialiased;
-    }
-    button, select, input { font: inherit; }
-    button:focus-visible, select:focus-visible, input:focus-visible + .switch-track {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
-    }
-    .panel { padding: 15px 16px; }
-    .masthead { display: flex; align-items: center; gap: 11px; padding: 2px 1px 11px; }
-    .brand-mark {
-      display: grid;
-      width: 34px;
-      height: 34px;
-      place-items: center;
-      border: 1px solid var(--line);
-      border-radius: 9px;
-      background: var(--surface);
-      color: var(--accent);
-      flex: 0 0 auto;
-    }
-    .brand-mark svg { display: block; width: 20px; height: 20px; }
-    .brand-copy { min-width: 0; }
-    .eyebrow {
-      color: var(--muted);
-      font-size: 9px;
-      font-weight: 650;
-      letter-spacing: .12em;
-      line-height: 1.3;
-      text-transform: uppercase;
-    }
-    h1 {
-      margin: 1px 0 0;
-      font: 400 19px/1.15 Georgia, "Iowan Old Style", serif;
-      letter-spacing: -.035em;
-    }
-    .conversation {
-      display: flex;
-      min-height: 50px;
-      align-items: center;
-      gap: 11px;
-      padding: 9px 11px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: var(--surface);
-    }
-    .conv-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--success);
-      flex: 0 0 auto;
-    }
-    .conv-dot.offline { background: var(--line-strong); }
-    .conversation-copy { display: grid; min-width: 0; gap: 2px; }
-    .conversation-copy .eyebrow { font-size: 9px; letter-spacing: .08em; }
-    .conv-name {
-      overflow: hidden;
-      color: var(--ink);
-      font-size: 12px;
-      font-weight: 560;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .conv-name.muted { color: var(--muted); font-weight: 400; }
-    .section { margin-top: 15px; }
-    .section-heading {
-      margin: 0 0 8px 1px;
-      color: var(--muted);
-      font-size: 10px;
-      font-weight: 650;
-      letter-spacing: .09em;
-      text-transform: uppercase;
-    }
-    .settings {
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: var(--surface);
-    }
-    .setting-row {
-      display: flex;
-      min-height: 44px;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 7px 10px;
-      border-bottom: 1px solid var(--line);
-    }
-    .setting-row:last-child { border-bottom: 0; }
-    .setting-row:hover { background: var(--surface-raised); }
-    .setting-copy { display: grid; min-width: 0; gap: 2px; }
-    .setting-label { color: var(--ink); font-size: 12px; font-weight: 550; }
-    .setting-note { color: var(--muted); font-size: 10px; line-height: 1.4; }
-    .format-row { min-height: 50px; }
-    .format-select, .date-input {
-      min-height: 32px;
-      border: 1px solid var(--line-strong);
-      border-radius: 5px;
-      background: var(--surface);
-      color: var(--ink);
-    }
-    .format-select { width: 154px; padding: 5px 26px 5px 8px; }
-    .date-input { width: 138px; padding: 5px 7px; }
-    .format-select:hover, .date-input:hover { border-color: var(--accent); }
-    .setting-row.is-disabled { opacity: .48; }
-    .date-input:disabled { cursor: not-allowed; }
-    .switch {
-      position: relative;
-      display: inline-flex;
-      width: 34px;
-      height: 20px;
-      flex: 0 0 auto;
-      cursor: pointer;
-    }
-    .switch input {
-      position: absolute;
-      z-index: 1;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      margin: 0;
-      opacity: 0;
-      cursor: pointer;
-    }
-    .switch-track {
-      position: absolute;
-      inset: 0;
-      border: 1px solid var(--line-strong);
-      border-radius: 12px;
-      background: var(--hover);
-      transition: background .16s ease, border-color .16s ease;
-    }
-    .switch-thumb {
-      position: absolute;
-      top: 3px;
-      left: 3px;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: var(--muted);
-      transition: transform .16s ease, background .16s ease;
-    }
-    .switch input:checked + .switch-track { border-color: var(--accent); background: var(--accent); }
-    .switch input:checked + .switch-track .switch-thumb { transform: translateX(14px); background: var(--surface); }
-    .switch input:disabled + .switch-track { cursor: not-allowed; }
-    .export-btn {
-      display: flex;
-      width: 100%;
-      min-height: 40px;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      margin-top: 14px;
-      padding: 9px 12px;
-      border: 1px solid var(--ink);
-      border-radius: 5px;
-      background: var(--ink);
-      color: var(--surface);
-      font-size: 12px;
-      font-weight: 620;
-      cursor: pointer;
-      transition: background .14s ease, transform .14s ease;
-    }
-    .export-btn:hover { background: #3c403a; }
-    :root[data-gce-theme="dark"] .export-btn:hover { background: #d2d8cf; }
-    .export-btn:active { transform: scale(.99); }
-    .export-btn:disabled { cursor: progress; opacity: .68; }
-    .button-spinner {
-      width: 13px;
-      height: 13px;
-      border: 1.5px solid currentColor;
-      border-right-color: transparent;
-      border-radius: 50%;
-      animation: spin .7s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .status-area {
-      display: none;
-      flex-direction: column;
-      gap: 8px;
-      margin-top: 12px;
-      padding: 11px;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: var(--surface);
-    }
-    .status-area.visible { display: flex; }
-    .job-name {
-      overflow-wrap: anywhere;
-      color: var(--muted);
-      font-size: 10px;
-      font-weight: 550;
-    }
-    .status-line { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-    .status-copy { display: flex; min-width: 0; align-items: center; gap: 8px; }
-    .status-text { color: var(--ink); font-size: 12px; line-height: 1.4; }
-    .status-value { flex: 0 0 auto; color: var(--muted); font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
-    .status-spinner {
-      width: 12px;
-      height: 12px;
-      flex: 0 0 auto;
-      border: 1.5px solid var(--line-strong);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin .8s linear infinite;
-    }
-    .progress-bar-wrap { height: 2px; overflow: hidden; background: var(--line); }
-    .progress-bar { width: 0; height: 100%; background: var(--accent); transition: width .25s ease; }
-    .progress-bar.done { background: var(--success); }
-    .progress-bar.error { background: var(--danger); }
-    .job-controls { display: flex; align-items: center; gap: 7px; margin-top: 1px; }
-    .job-controls[hidden], .job-controls button[hidden] { display: none; }
-    .job-controls button {
-      min-height: 28px;
-      padding: 5px 8px;
-      border: 1px solid var(--line);
-      border-radius: 4px;
-      background: transparent;
-      color: var(--ink);
-      font-size: 10px;
-      cursor: pointer;
-    }
-    .job-controls button:hover { background: var(--hover); }
-    .job-controls #dismiss-status { margin-left: auto; padding-inline: 9px; color: var(--muted); font-size: 15px; }
-    .job-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .error-note { margin: 8px 1px 0; color: var(--danger); font-size: 11px; }
-    .error-note[hidden] { display: none; }
-    #export-result[hidden] { display: none; }
-    #export-result { margin-top: 12px; }
-    #export-result iframe { max-width: 100%; }
-    .footnote {
-      margin: 12px 1px 1px;
-      color: var(--faint);
-      font-size: 10px;
-      text-align: center;
-    }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
-    }
-  </style>
+  <link rel="stylesheet" href="ui.css">
 </head>
-<body>
-  <main class="panel">
-    <header class="masthead">
-      <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M4 5.75A2.75 2.75 0 0 1 6.75 3h10.5A2.75 2.75 0 0 1 20 5.75v8.5A2.75 2.75 0 0 1 17.25 17H10l-5 4v-4.25A2.75 2.75 0 0 1 4 14.5z"/>
-          <path d="M8 8h8M8 12h5"/>
-        </svg>
-      </span>
-      <div class="brand-copy">
-        <p class="eyebrow">Google Chat</p>
-        <h1>Conversation export</h1>
-      </div>
-    </header>
+<body class="popup-body">
+  <header class="app-header">Chat Exporter</header>
+  <main>
+    <h1 class="conversation" id="conv-name">Google Chat</h1>
+    <p class="error" id="connection-error" role="alert" hidden></p>
 
-    <section class="conversation" id="conv-bar" aria-label="Current conversation status" aria-live="polite">
-      <span class="conv-dot offline" id="conv-dot" aria-hidden="true"></span>
-      <div class="conversation-copy">
-        <span class="eyebrow">Conversation</span>
-        <span class="conv-name muted" id="conv-name">Not on Google Chat</span>
-      </div>
-    </section>
-
-    <div class="status-area" id="status-area" role="status" aria-live="polite">
+    <section class="status-area" id="status-area" role="status" aria-live="polite">
       <div class="job-name" id="job-name" hidden></div>
-      <div class="status-line">
-        <div class="status-copy">
-          <span class="status-spinner" id="status-spinner" aria-hidden="true"></span>
-          <span id="status-text">Exporting</span>
-        </div>
-        <span class="status-value" id="status-value">0%</span>
-      </div>
-      <div class="progress-bar-wrap" role="presentation">
+      <span id="status-text"></span>
+      <div class="progress-track" id="progress-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100">
         <div class="progress-bar" id="progress-bar"></div>
       </div>
       <div class="job-controls" id="job-controls" hidden>
         <button type="button" id="return-to-chat">Return to Chat</button>
         <button type="button" id="cancel-export">Cancel</button>
-        <button type="button" id="dismiss-status" aria-label="Dismiss export status" title="Dismiss">×</button>
+        <button class="icon-button" type="button" id="dismiss-status" aria-label="Dismiss export status" title="Dismiss">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
       </div>
-    </div>
-
+    </section>
     <div id="export-result" hidden></div>
 
-    <section class="section" aria-labelledby="export-settings-heading">
-      <h2 class="section-heading" id="export-settings-heading">Export settings</h2>
-      <div class="settings">
-        <div class="setting-row format-row">
-          <label class="setting-label" for="format-select">File format</label>
-          <select class="format-select" id="format-select">
-            <option value="txt">Plain text (.txt)</option>
-            <option value="md">Markdown (.md)</option>
-            <option value="html">HTML</option>
-          </select>
-        </div>
-        <div class="setting-row" id="history-row">
-          <div class="setting-copy">
-            <label class="setting-label" id="load-all-label" for="load-all">Full history</label>
-            <span class="setting-note">Includes threaded replies</span>
-          </div>
-          <label class="switch" aria-label="Load full conversation history">
-            <input type="checkbox" id="load-all" aria-labelledby="load-all-label" checked>
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-        <div class="setting-row" id="date-row">
-          <label class="setting-label" for="date-from">From date</label>
-          <input class="date-input" type="date" id="date-from">
-        </div>
-        <div class="setting-row">
-          <div class="setting-copy">
-            <label class="setting-label" id="incremental-label" for="incremental">Only new messages</label>
-            <span class="setting-note">First export sets the starting point</span>
-          </div>
-          <label class="switch" aria-label="Export only new messages">
-            <input type="checkbox" id="incremental" aria-labelledby="incremental-label">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-        <div class="setting-row" id="media-row">
-          <div class="setting-copy">
-            <label class="setting-label" id="include-media-label" for="include-media">Include attachments</label>
-            <span class="setting-note">Only for HTML exports</span>
-          </div>
-          <label class="switch" aria-label="Include attachments in the HTML export">
-            <input type="checkbox" id="include-media" aria-labelledby="include-media-label" checked>
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
+    <div class="fields">
+      <div class="field">
+        <label for="format-select">Format</label>
+        <select id="format-select">
+          <option value="txt">Text (.txt)</option>
+          <option value="md">Markdown (.md)</option>
+          <option value="html">HTML</option>
+        </select>
       </div>
-    </section>
-
-    <section class="section" aria-labelledby="preferences-heading">
-      <h2 class="section-heading" id="preferences-heading">Preferences</h2>
-      <div class="settings">
-        <div class="setting-row">
-          <label class="setting-label" id="dark-mode-label" for="dark-mode">Dark appearance</label>
-          <label class="switch" aria-label="Dark appearance">
-            <input type="checkbox" id="dark-mode" aria-labelledby="dark-mode-label">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
-        <div class="setting-row">
-          <div class="setting-copy">
-            <label class="setting-label" id="export-mode-label" for="export-mode">Auto-export on open</label>
-            <span class="setting-note">Stops after 10 minutes idle</span>
-          </div>
-          <label class="switch" aria-label="Auto-export each channel when opened">
-            <input type="checkbox" id="export-mode" aria-labelledby="export-mode-label">
-            <span class="switch-track"><span class="switch-thumb"></span></span>
-          </label>
-        </div>
+      <div class="field">
+        <label for="range-select">Messages</label>
+        <select id="range-select">
+          <option value="all">All messages and replies</option>
+          <option value="since">Since a date…</option>
+          <option value="new">New since last export</option>
+          <option value="visible">Loaded messages only</option>
+          <option value="visible-since">Loaded since a date…</option>
+        </select>
       </div>
-    </section>
+      <div class="field" id="date-row" hidden>
+        <label for="date-from">From</label>
+        <input type="date" id="date-from" disabled>
+      </div>
+    </div>
+    <label class="check-row" id="media-row" hidden>
+      <input type="checkbox" id="include-media" checked disabled>
+      Download attachments
+    </label>
+    <p class="error" id="settings-error" role="alert" hidden></p>
+    <button class="primary export-btn" id="export-btn" type="button" disabled>Export</button>
 
-    <p id="theme-error" class="error-note" role="alert" hidden></p>
-
-    <button class="export-btn" id="export-btn" type="button">
-      <span class="button-label">Export conversation</span>
-    </button>
-
-    <p class="footnote">Export files are saved on this device.</p>
+    <details class="options">
+      <summary>Options</summary>
+      <label class="check-row"><input type="checkbox" id="export-mode">Auto-export on open</label>
+      <label class="check-row"><input type="checkbox" id="dark-mode">Dark mode</label>
+    </details>
+    <p class="error" id="theme-error" role="alert" hidden></p>
   </main>
-
   <script src="theme.js"></script>
   <script src="result-host.js"></script>
   <script src="popup.js"></script>

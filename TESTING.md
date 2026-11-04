@@ -16,6 +16,8 @@ Theme tests cover system defaults, saved light/dark choices, updates across popu
 
 These tests mock `chrome.*` APIs. They do not prove that an installed extension has the required permissions, selects the right iframe, remains active through browser worker suspension, or successfully fetches authenticated Google attachments.
 
+Frame-startup regressions execute the real content files in separate VM worlds for Gmail and its Chat iframe. The fixture supplies background senders without a frame ID, records frame-targeted starts, and runs injected functions in each world. It covers missing-helper repair, concurrent startup without script redeclaration, explicit rejection, isolated-world fallback, and stale-protocol errors. Content regressions also cover a detached progress host and a notification-rendering failure after a successful save. Popup cases cover delayed hydration during startup, failed starts without a second broadcast, unrelated frame relays, all existing range-setting combinations, and failed settings saves before auto-export is enabled. These remain simulated browser contexts, not an installed-browser end-to-end run.
+
 ## Live verification performed
 
 Read-only extraction was exercised in Vivaldi against a 5-reply thread and a 46-reply thread. The latter contained 45 normal replies and one existing deleted-message placeholder. All reply entries were captured with their parent relationship; the prior thread state and exact main scroll position were restored. No chat messages were sent, edited, or deleted.

@@ -12,6 +12,8 @@ if (typeof importScripts === 'function' && typeof ExportJobs === 'undefined') {
 const mediaRequests = new Map();
 const CHAT_URL_PATTERNS = ['https://chat.google.com/*', 'https://mail.google.com/*',
   'https://chat.google.com.mcas.ms/*', 'https://mail.google.com.mcas.ms/*'];
+const CONTENT_PROTOCOL = 1; // Keep in sync with content.js getExportHealth().
+const contentPreparations = new Map();
 // Persist pending download/checkpoint associations so worker suspension is safe.
 let checkpointQueue = Promise.resolve();
 function serializeCheckpoint(work) {
@@ -210,15 +212,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.action === 'getConversation') {
+    (async () => {
+      try {
+        const tab = await chrome.tabs.get(msg.tabId);
+        if (!tab.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) throw new Error('Open a conversation in Google Chat.');
+        const frame = await ensureContentScript(tab.id);
+        sendResponse({ success: true, name: frame.name });
+      } catch (error) {
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
   if (msg.action === 'popupExport') {
     // Triggered from popup button
     (async () => {
       try {
         const tab = msg.tabId ? await chrome.tabs.get(msg.tabId) : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
         if (!tab) { sendResponse({ success: false, error: 'No active tab found.' }); return; }
-        const started = await triggerExport(tab, msg.format || 'txt', msg.settings);
+        const started = await triggerExport(tab, msg.format || 'txt', msg.settings, msg.jobId);
         if (!started) { sendResponse({ success: false, error: 'Could not prepare Google Chat for export. Refresh the tab and try again.' }); return; }
-        sendResponse({ success: true });
+        sendResponse({ success: true, jobId: started.jobId });
       } catch (err) {
         sendResponse({ success: false, error: err.message });
       }
@@ -307,7 +323,7 @@ ExportJobs.recover().catch(console.error);
  * Trigger export on a tab with PWA/app window support.
  * Uses multi-strategy injection to handle normal tabs AND PWA windows.
  */
-async function triggerExport(contextMenuTab, format, overrides = {}) {
+async function triggerExport(contextMenuTab, format, overrides = {}, requestedJobId = '') {
   // Find the best target tab (handles PWA windows)
   const targetTabId = await resolveTargetTab(contextMenuTab);
   if (!targetTabId) {
@@ -315,36 +331,35 @@ async function triggerExport(contextMenuTab, format, overrides = {}) {
     return false;
   }
 
-  // Ensure the content script and its UI helpers are ready in that tab.
-  const injected = await ensureContentScript(targetTabId);
-  if (!injected) {
-    console.error('[GCE BG] Could not inject content script into tab', targetTabId);
-    throw new Error('Could not prepare Google Chat for export. Refresh the tab and try again.');
-  }
+  const frame = await ensureContentScript(targetTabId);
+  if (!['txt', 'md', 'html'].includes(format)) throw new Error('Choose a supported export format.');
 
   // Send export command
   const settings = { ...await getSettings(), ...overrides };
   settings.sourceUrl = (await chrome.tabs.get(targetTabId)).url;
-  chrome.tabs.sendMessage(targetTabId, {
+  const command = {
     action: 'startExport',
+    jobId: /^job-[a-zA-Z0-9-]{1,96}$/.test(requestedJobId) ? requestedJobId : `job-${crypto.randomUUID()}`,
     format,
     loadAll: settings.loadAll !== false,  // default true
     includeMedia: settings.includeMedia !== false,  // default true for html
     dateFrom: settings.dateFrom || '',
     incremental: settings.incremental === true,
     sourceUrl: settings.sourceUrl
-  }, (resp) => {
-    if (chrome.runtime.lastError) {
-      // Final fallback: direct script injection — bypasses message channel entirely
-      // This is the key fix for Brave PWA windows
-      chrome.scripting.executeScript({
-        target: { tabId: targetTabId, allFrames: true },
-        func: injectableExportTrigger,
-        args: [format, settings]
-      }).catch(err => console.error('[GCE BG] executeScript fallback failed:', err));
-    }
-  });
-  return true;
+  };
+  let response;
+  try {
+    response = await chrome.tabs.sendMessage(targetTabId, command, { frameId: frame.frameId });
+  } catch {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: targetTabId, frameIds: [frame.frameId] },
+      func: injectableExportTrigger,
+      args: [command]
+    });
+    response = results[0]?.result;
+  }
+  if (!response?.received) throw new Error(response?.error || 'Export did not start. Refresh the Chat tab and retry.');
+  return response;
 }
 
 /**
@@ -371,67 +386,62 @@ async function resolveTargetTab(contextMenuTab) {
   return null;
 }
 
-/**
- * Ensures the content script is alive in the tab.
- * If not, re-injects it using scripting.executeScript.
- * This is critical for PWA windows where the content script
- * may not have a live message channel.
- */
-async function ensureContentScript(tabId) {
-  // Check both liveness and the helpers required by the current content script.
-  const status = await new Promise(resolve => {
-    chrome.tabs.sendMessage(tabId, { action: 'ping' }, resp => {
-      if (chrome.runtime.lastError || !resp?.alive) {
-        resolve(null);
-      } else {
-        resolve(resp);
-      }
-    });
-  });
-
-  if (status) {
-    const files = [];
-    if (status.themeReady !== true) files.push('theme.js');
-    if (status.resultHostReady !== true) files.push('result-host.js');
-    if (!files.length) return true;
-
-    try {
-      const target = Number.isInteger(status.frameId)
-        ? { tabId, frameIds: [status.frameId] }
-        : { tabId, allFrames: true };
-      await chrome.scripting.executeScript({ target, files });
-      return true;
-    } catch (err) {
-      console.error('[GCE BG] Failed to restore content helpers:', err);
-      return false;
-    }
-  }
-
-  // Re-inject the content script
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      files: ['theme.js', 'result-host.js', 'content.js']
-    });
-    // Wait for initialization
-    await sleep(400);
-    return true;
-  } catch (err) {
-    console.error('[GCE BG] Failed to inject content script:', err);
-    return false;
-  }
+// Use scripting results for frame identity. MessageSender describes the sender,
+// so a response to a background ping cannot tell us the receiver's frame ID.
+async function inspectExportFrame() {
+  if (!/^(chat|mail)\.google\.com(?:\.mcas\.ms)?$/.test(new URL(location.href).hostname)) return { supported: false };
+  if (typeof loadSelectors === 'function') await loadSelectors();
+  const health = typeof getExportHealth === 'function' ? getExportHealth() : {
+    protocol: 0,
+    inChatFrame: typeof isInChatFrame === 'function' && isInChatFrame()
+  };
+  return {
+    ...health,
+    supported: true,
+    contentLoaded: typeof runExport === 'function',
+    themeReady: typeof GCETheme !== 'undefined' && typeof GCETheme.bind === 'function',
+    resultHostReady: typeof mountExportResult === 'function'
+  };
 }
 
-/**
- * Injectable function for the nuclear fallback.
- * This runs directly in the page context via executeScript,
- * bypassing message passing entirely — works in all PWA/app window scenarios.
- */
-function injectableExportTrigger(format, settings) {
-  // Dispatch a custom event that content.js listens for
-  window.dispatchEvent(new CustomEvent('gce:startExport', {
-    detail: { format, ...settings }
-  }));
+async function prepareContentFrames(tabId) {
+  const probe = () => chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: inspectExportFrame });
+  let frames = await probe();
+  let injected = false;
+  for (const { frameId, result } of frames) {
+    if (!result?.supported || (result.contentLoaded && result.protocol !== CONTENT_PROTOCOL)) continue;
+    const files = [];
+    if (!result.themeReady) files.push('theme.js');
+    if (!result.resultHostReady) files.push('result-host.js');
+    if (!result.contentLoaded) files.push('content.js');
+    if (!files.length) continue;
+    await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files });
+    injected = true;
+  }
+  if (injected) frames = await probe();
+  const ready = frames.find(({ result }) => result?.protocol === CONTENT_PROTOCOL && result.inChatFrame && result.themeReady && result.resultHostReady);
+  if (ready) return { frameId: ready.frameId, ...ready.result };
+  if (frames.some(({ result }) => result?.contentLoaded && result.protocol !== CONTENT_PROTOCOL && result.inChatFrame)) {
+    throw new Error('Refresh the Chat tab to finish updating the extension.');
+  }
+  throw new Error('Open a conversation in Google Chat.');
+}
+
+async function ensureContentScript(tabId) {
+  // A popup open and an export click may request preparation together.
+  // Share the work so neither can redeclare scripts injected by the other.
+  if (contentPreparations.has(tabId)) return contentPreparations.get(tabId);
+  const pending = prepareContentFrames(tabId);
+  contentPreparations.set(tabId, pending);
+  try { return await pending; }
+  finally { contentPreparations.delete(tabId); }
+}
+
+// PWA fallback stays in the extension's isolated world and uses the same
+// acceptance/busy checks. A page-dispatched DOM event cannot start an export.
+async function injectableExportTrigger(command) {
+  if (typeof startExportRequest !== 'function') return { received: false };
+  return startExportRequest(command);
 }
 
 // ── Settings ────────────────────────────────────────────────

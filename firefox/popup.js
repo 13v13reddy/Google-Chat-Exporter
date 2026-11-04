@@ -17,86 +17,86 @@ async function toggleDarkMode() {
   }
 }
 
-// ── Settings persistence ─────────────────────────────────────
+// The UI has one range control; stored flags stay compatible with context-menu
+// and automatic exports, including loaded messages filtered by date.
+let settingsRevision = 0;
+let settingsQueue = Promise.resolve();
+let conversationReady = false;
+const datedRange = range => range === 'since' || range === 'visible-since';
+
+function readSettings() {
+  const range = $('range-select').value;
+  return {
+    format: $('format-select').value,
+    loadAll: range !== 'visible' && range !== 'visible-since',
+    includeMedia: $('include-media').checked,
+    dateFrom: datedRange(range) ? $('date-from').value : '',
+    incremental: range === 'new'
+  };
+}
 
 async function loadSettings() {
+  const revision = settingsRevision;
   try {
-    const { gceSettings } = await chrome.storage.local.get('gceSettings');
-    const s = gceSettings || {};
-    if (s.format) $('format-select').value = s.format;
-    if (typeof s.loadAll !== 'undefined') $('load-all').checked = s.loadAll;
-    if (typeof s.includeMedia !== 'undefined') $('include-media').checked = s.includeMedia;
-    if (s.dateFrom) $('date-from').value = s.dateFrom;
-    $('incremental').checked = s.incremental === true;
-    updateIncrementalControls();
+    const { gceSettings: settings = {} } = await chrome.storage.local.get('gceSettings');
+    if (revision !== settingsRevision) return;
+    if (['txt', 'md', 'html'].includes(settings.format)) $('format-select').value = settings.format;
+    $('include-media').checked = settings.includeMedia !== false;
+    $('date-from').value = settings.dateFrom || '';
+    $('range-select').value = settings.incremental ? 'new' : settings.loadAll === false
+      ? (settings.dateFrom ? 'visible-since' : 'visible') : (settings.dateFrom ? 'since' : 'all');
+    updateRangeControls();
     updateMediaRowVisibility();
-  } catch { /* storage not accessible */ }
+  } catch {
+    $('settings-error').textContent = 'Could not load saved settings.';
+    $('settings-error').hidden = false;
+  }
 }
 
 function saveSettings() {
-  const settings = {
-    format: $('format-select').value,
-    loadAll: $('load-all').checked,
-    includeMedia: $('include-media').checked,
-    dateFrom: $('date-from').value,
-    incremental: $('incremental').checked
-  };
-  chrome.storage.local.set({ gceSettings: settings }).catch(() => {});
+  const settings = readSettings();
+  settingsRevision++;
+  const saved = settingsQueue.then(() => chrome.storage.local.set({ gceSettings: settings }));
+  settingsQueue = saved.catch(() => {});
+  return saved.then(() => { $('settings-error').hidden = true; return true; }, () => {
+    $('settings-error').textContent = 'Could not save settings. Try again.';
+    $('settings-error').hidden = false;
+    return false;
+  });
 }
 
 function updateMediaRowVisibility() {
-  const isHtml = $('format-select').value === 'html';
-  if (isHtml) $('media-row').classList.remove('is-disabled');
-  else $('media-row').classList.add('is-disabled');
-  $('include-media').disabled = !isHtml;
+  const available = $('format-select').value === 'html';
+  $('media-row').hidden = !available;
+  $('include-media').disabled = !available;
 }
 
-function updateIncrementalControls() {
-  const enabled = $('incremental').checked;
-  $('load-all').disabled = enabled;
-  $('date-from').disabled = enabled;
-  for (const id of ['history-row', 'date-row']) {
-    if (enabled) $(id).classList.add('is-disabled');
-    else $(id).classList.remove('is-disabled');
-  }
+function updateRangeControls() {
+  const dated = datedRange($('range-select').value);
+  $('date-row').hidden = !dated;
+  $('date-from').disabled = !dated;
+  $('date-from').required = dated;
 }
-
-// ── Conversation Status Bar ──────────────────────────────────
 
 async function detectConversation() {
   try {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const tab = tabs[0];
-
-    if (!tab || !tab.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) {
-      setConvStatus(false, 'Not on Google Chat');
-      return;
-    }
-
-    // Try to get conversation name from content script
-    chrome.tabs.sendMessage(tab.id, { action: 'getConversationName' }, (resp) => {
-      if (chrome.runtime.lastError || !resp) {
-        setConvStatus(true, 'Google Chat — open a conversation');
-        return;
-      }
-      const name = resp.name;
-      if (name) {
-        setConvStatus(true, name);
-      } else {
-        setConvStatus(true, 'Google Chat — open a conversation');
-      }
-    });
-  } catch {
-    setConvStatus(false, 'Not on Google Chat');
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) throw new Error('Open a conversation in Google Chat.');
+    const response = await chrome.runtime.sendMessage({ action: 'getConversation', tabId: tab.id });
+    if (!response?.success) throw new Error(response?.error || 'Could not connect to Chat. Refresh the Chat tab and retry.');
+    setConvStatus(true, response.name || 'Google Chat');
+  } catch (error) {
+    setConvStatus(false, 'Google Chat');
+    $('connection-error').textContent = error.message;
+    $('connection-error').hidden = false;
   }
 }
 
-function setConvStatus(online, name) {
-  const dot = $('conv-dot');
-  const label = $('conv-name');
-  dot.className = 'conv-dot' + (online ? '' : ' offline');
-  label.textContent = name;
-  label.className = 'conv-name' + (online ? '' : ' muted');
+function setConvStatus(ready, name) {
+  conversationReady = ready;
+  $('conv-name').textContent = name;
+  $('connection-error').hidden = ready;
+  if (!isExporting) resetBtn();
 }
 
 // ── Export Mode ──────────────────────────────────────────────
@@ -111,11 +111,16 @@ async function loadExportMode() {
 async function toggleExportMode() {
   const enabled = $('export-mode').checked;
   try {
+    if (enabled && !await saveSettings()) {
+      $('export-mode').checked = false;
+      return;
+    }
     const resp = await chrome.runtime.sendMessage({ action: 'setExportMode', enabled });
     $('export-mode').checked = resp?.enabled === true;
-    if (resp?.enabled && !visibleJobId && !isExporting) showStatus('Auto-export is on. Open a channel to save it.', 100, 'done');
   } catch {
     $('export-mode').checked = !enabled;
+    $('settings-error').textContent = 'Could not change auto-export. Try again.';
+    $('settings-error').hidden = false;
   }
 }
 
@@ -123,59 +128,46 @@ async function toggleExportMode() {
 
 let isExporting = false;
 
+let pendingJobId = null;
+let pendingStartTimer = null;
+
+function clearPendingStart() {
+  pendingJobId = null;
+  clearTimeout(pendingStartTimer);
+  pendingStartTimer = null;
+}
+
 async function triggerExport() {
   if (isExporting) return;
+  const jobId = `job-${crypto.randomUUID()}`;
+  pendingJobId = jobId;
   visibleJobId = null;
   $('job-controls').hidden = true;
   setExporting();
-
-  showStatus('Starting export...', 2);
-
+  showStatus('Starting export…', 0);
+  pendingStartTimer = setTimeout(() => {
+    if (pendingJobId !== jobId) return;
+    clearPendingStart();
+    showStatus('No progress received. Return to Chat and retry.', 0, 'error');
+    resetBtn();
+  }, 8000);
   try {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const tab = tabs[0];
-
-    if (!tab) {
-      throw new Error('No active tab found.');
+    const settings = readSettings();
+    if (datedRange($('range-select').value) && !settings.dateFrom) throw new Error('Choose a start date.');
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) throw new Error('Open a conversation in Google Chat.');
+    const response = await chrome.runtime.sendMessage({ action: 'popupExport', jobId, tabId: tab.id, format: settings.format, settings });
+    if (!response?.success) throw new Error(response?.error || 'Could not start export. Try again.');
+    if (pendingJobId !== jobId && !exportJobs.has(jobId)) return;
+    renderExportJobs();
+  } catch (error) {
+    if (pendingJobId !== jobId) {
+      if (exportJobs.has(jobId)) renderExportJobs();
+      return;
     }
-
-    if (!tab.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) {
-      throw new Error('Please navigate to Google Chat first.');
-    }
-
-    const format = $('format-select').value;
-    const loadAll = $('load-all').checked;
-    const includeMedia = $('include-media').checked;
-    const dateFrom = $('date-from').value;
-
-    const incremental = $('incremental').checked;
-    const settings = { loadAll, includeMedia, dateFrom, incremental };
-
-    const response = await chrome.runtime.sendMessage({
-      action: 'popupExport',
-      format,
-      tabId: tab.id,
-      settings
-    }).catch(err => ({ success: false, error: err?.message }));
-
-    if (!response?.success) {
-      chrome.tabs.sendMessage(tab.id, {
-        action: 'startExport',
-        format,
-        loadAll,
-        includeMedia,
-        dateFrom,
-        incremental
-      }, () => {
-        if (chrome.runtime.lastError) {
-          showStatus(response?.error || 'Could not start export', 0, 'error');
-          resetBtn();
-        }
-      });
-    }
-
-  } catch (err) {
-    showStatus(err.message, 0, 'error');
+    clearPendingStart();
+    if (exportJobs.has(jobId) || [...exportJobs.values()].some(jobActive)) { renderExportJobs(); return; }
+    showStatus(error.message, 0, 'error');
     resetBtn();
   }
 }
@@ -191,8 +183,8 @@ function setExporting(label = 'Exporting') {
 function resetBtn() {
   isExporting = false;
   const btn = $('export-btn');
-  btn.disabled = false;
-  btn.textContent = 'Export conversation';
+  btn.disabled = !conversationReady;
+  btn.textContent = 'Export';
 }
 
 // ── Status / Progress ────────────────────────────────────────
@@ -231,13 +223,12 @@ function showStatus(text, percent, state = 'working') {
   $('job-name').hidden = true;
   $('status-text').textContent = text;
   const safePercent = Number.isFinite(Number(percent)) ? Math.max(0, Math.min(100, Number(percent))) : 0;
-  $('status-value').textContent = state === 'paused' ? 'Paused' : state === 'error' ? 'Failed' : `${Math.round(safePercent)}%`;
+  $('status-area').setAttribute('data-state', state);
+  $('progress-track').setAttribute('aria-valuenow', String(Math.round(safePercent)));
+  $('progress-track').setAttribute('aria-valuetext', text);
   const bar = $('progress-bar');
   bar.style.width = safePercent + '%';
   bar.className = 'progress-bar' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
-
-  const spinner = $('status-spinner');
-  spinner.style.display = (state === 'done' || state === 'error' || state === 'paused') ? 'none' : 'block';
 }
 
 function hideStatus() {
@@ -261,9 +252,13 @@ function mergeExportJob(job) {
 }
 
 function renderExportJobs() {
+  if (pendingJobId) {
+    if (!exportJobs.has(pendingJobId)) return;
+    clearPendingStart();
+  }
   const all = [...exportJobs.values()].sort((a, b) => b.startedAt - a.startedAt);
   const activeJob = all.find(job => jobActive(job) && job.phase !== 'download');
-  if (activeJob) setExporting(activeJob.phase === 'download' ? 'Saving export' : activeJob.phase === 'packaging' ? 'Preparing file' : 'Exporting');
+  if (activeJob) setExporting(activeJob.phase === 'packaging' ? 'Preparing file' : 'Exporting');
   else resetBtn();
   const available = all.filter(job => !dismissedJobs.has(job.jobId) && !job.acknowledged);
   const job = available.find(jobActive) || available[0];
@@ -279,7 +274,7 @@ function renderExportJobs() {
   }
   showStatus(job.text, job.percent, job.state);
   $('job-name').textContent = job.conversationName;
-  $('job-name').hidden = false;
+  $('job-name').hidden = !job.conversationName || job.conversationName === $('conv-name').textContent;
   $('job-controls').hidden = jobActive(job) && job.phase === 'packaging';
   $('return-to-chat').hidden = !jobActive(job) || job.phase === 'packaging';
   $('cancel-export').hidden = !jobActive(job) || job.phase === 'packaging';
@@ -322,7 +317,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
   if (msg.action === 'exportStateUpdate') {
-    if (msg.jobId) return; // The background publishes the persisted, canonical status.
+    if (msg.jobId || pendingJobId || [...exportJobs.values()].some(jobActive)) return;
     if (msg.state === 'done' && Number.isSafeInteger(msg.downloadId) && msg.downloadId >= 0) {
       if (dismissedResults.has(msg.downloadId)) return;
       resetBtn();
@@ -342,24 +337,19 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // ── Init ─────────────────────────────────────────────────────
 
-document.addEventListener('DOMContentLoaded', async () => {
-  await loadSettings();
-  detectConversation();
-  loadExportMode();
-  loadExportJobs();
-
+document.addEventListener('DOMContentLoaded', () => {
   $('export-btn').addEventListener('click', triggerExport);
-  $('format-select').addEventListener('change', () => {
-    updateMediaRowVisibility();
-    saveSettings();
-  });
-  $('load-all').addEventListener('change', saveSettings);
+  $('format-select').addEventListener('change', () => { updateMediaRowVisibility(); saveSettings(); });
+  $('range-select').addEventListener('change', () => { updateRangeControls(); saveSettings(); });
   $('include-media').addEventListener('change', saveSettings);
   $('date-from').addEventListener('change', saveSettings);
-  $('incremental').addEventListener('change', () => { updateIncrementalControls(); saveSettings(); });
   $('export-mode').addEventListener('change', toggleExportMode);
   $('dark-mode').addEventListener('change', toggleDarkMode);
   $('return-to-chat').addEventListener('click', () => controlExportJob('focusExportJob'));
   $('cancel-export').addEventListener('click', () => controlExportJob('cancelExportJob'));
   $('dismiss-status').addEventListener('click', () => dismissExportJob());
+  loadSettings();
+  detectConversation();
+  loadExportMode();
+  loadExportJobs();
 });

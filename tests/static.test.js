@@ -6,12 +6,44 @@ const path = require('node:path');
 const test = require('node:test');
 
 const root = path.join(__dirname, '..');
+const { checkSources } = require('../scripts/check-sources');
+
+test('shared browser sources cannot drift apart unnoticed', () => {
+  checkSources(root);
+  const temporary = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'gce-sources-'));
+  try {
+    for (const browser of ['chrome', 'firefox']) {
+      fs.mkdirSync(path.join(temporary, browser));
+      fs.writeFileSync(path.join(temporary, browser, 'manifest.json'), browser);
+      fs.writeFileSync(path.join(temporary, browser, 'content.js'), 'same');
+    }
+    checkSources(temporary);
+    fs.writeFileSync(path.join(temporary, 'firefox', 'content.js'), 'different');
+    assert.throws(() => checkSources(temporary), /Browser sources differ: content\.js/);
+  } finally { fs.rmSync(temporary, { recursive: true }); }
+});
+
+test('popup and saved result use one local stylesheet and explicitly named controls', () => {
+  for (const browser of ['chrome', 'firefox']) {
+    const popup = fs.readFileSync(path.join(root, browser, 'popup.html'), 'utf8');
+    const result = fs.readFileSync(path.join(root, browser, 'export-result.html'), 'utf8');
+    for (const html of [popup, result]) assert.match(html, /href="ui\.css"/);
+    for (const id of ['format-select', 'range-select', 'date-from']) assert.ok(popup.includes(`for="${id}"`));
+    for (const [html, file, pattern] of [
+      [popup, 'popup.js', /\$\('([^']+)'\)/g],
+      [result, 'export-result.js', /getElementById\('([^']+)'\)/g]
+    ]) {
+      const ids = Array.from(html.matchAll(/\bid="([^"]+)"/g), match => match[1]);
+      assert.equal(new Set(ids).size, ids.length, `${file} has no duplicate element IDs`);
+      const script = fs.readFileSync(path.join(root, browser, file), 'utf8');
+      for (const [, id] of script.matchAll(pattern)) assert.ok(ids.includes(id), `${browser}/${file} refers to missing #${id}`);
+    }
+  }
+});
 
 test('2.2 retains Gmail-integrated Chat support in Chrome extension', () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'chrome', 'manifest.json'), 'utf8'));
   assert.equal(manifest.version, '2.2.0');
-  const popup = fs.readFileSync(path.join(root, 'chrome', 'popup.html'), 'utf8');
-  assert.match(popup, /<h1>Conversation export<\/h1>/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version, manifest.version);
   assert.ok(manifest.host_permissions.includes('https://mail.google.com/*'));
   assert.ok(manifest.content_scripts.some(script =>
@@ -28,8 +60,6 @@ test('2.2 supports Firefox Add-on with Gecko settings and background scripts', (
   assert.ok(manifest.browser_specific_settings?.gecko_android?.strict_min_version);
   assert.deepEqual(manifest.browser_specific_settings?.gecko?.data_collection_permissions, { required: ['none'] });
   assert.deepEqual(manifest.background.scripts, ['lib/jszip.min.js', 'export-jobs.js', 'background.js']);
-  const popup = fs.readFileSync(path.join(root, 'firefox', 'popup.html'), 'utf8');
-  assert.match(popup, /<h1>Conversation export<\/h1>/);
   assert.ok(manifest.host_permissions.includes('https://mail.google.com/*'));
   assert.ok(manifest.content_scripts.some(script =>
     script.matches.includes('https://mail.google.com/*')

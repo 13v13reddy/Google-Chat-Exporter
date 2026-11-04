@@ -19,6 +19,7 @@ class Element {
     this.hidden = false;
     this.disabled = false;
     this.textContent = '';
+    this.isConnected = false;
     this.handlers = new Map();
     this.attributes = new Map();
     this.slots = new Map();
@@ -32,8 +33,8 @@ class Element {
   removeEventListener(type, fn) { this.handlers.get(type)?.delete(fn); }
   emit(type, value) { for (const fn of [...(this.handlers.get(type) || [])]) fn(value); }
   click() { if (!this.disabled) this.emit('click'); }
-  appendChild(child) { this.children.push(child); child.parent = this; return child; }
-  remove() { if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
+  appendChild(child) { this.children.push(child); child.parent = this; child.isConnected = true; return child; }
+  remove() { this.isConnected = false; if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
   getBoundingClientRect() { return { height: 144 }; }
 }
 
@@ -85,26 +86,36 @@ function page(target, file, options = {}) {
   });
   const load = name => vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, name), 'utf8'), context, { filename: `${target}/${name}` });
   load('theme.js');
-  if (file === 'popup.js') { element('export-result').hidden = true; load('result-host.js'); }
+  if (file === 'popup.js') {
+    element('export-result').hidden = true;
+    element('format-select').value = 'txt';
+    element('range-select').value = 'all';
+    element('include-media').checked = true;
+    load('result-host.js');
+  }
   load(file);
+  if (file === 'popup.js') vm.runInContext('conversationReady = true', context);
   return { context, load, document, window, chrome, element, elements, posted, opened, searches, timers, changed, erased, incoming, origin,
     setItem(value) { item = value; }, getItem() { return item; } };
 }
 
 for (const target of ['chrome', 'firefox']) {
-  test(`${target}: dependent settings look disabled when incremental export is on`, () => {
-    const p = page(target, 'popup.js');
-    p.element('incremental').checked = true;
-    p.context.updateIncrementalControls();
-    assert.equal(p.element('load-all').disabled, true);
-    assert.equal(p.element('date-from').disabled, true);
-    assert.equal(p.element('history-row').classList.contains('is-disabled'), true);
-    assert.equal(p.element('date-row').classList.contains('is-disabled'), true);
-
-    p.element('incremental').checked = false;
-    p.context.updateIncrementalControls();
-    assert.equal(p.element('history-row').classList.contains('is-disabled'), false);
-    assert.equal(p.element('date-row').classList.contains('is-disabled'), false);
+  test(`${target}: the range control round-trips existing export settings without losing a mode`, async () => {
+    for (const [range, loadAll, incremental, dateFrom] of [
+      ['all', true, false, ''], ['since', true, false, '2026-10-12'],
+      ['new', true, true, ''], ['visible', false, false, ''], ['visible-since', false, false, '2026-10-12']
+    ]) {
+      const p = page(target, 'popup.js');
+      const settings = { format: 'md', loadAll, incremental, dateFrom, includeMedia: false };
+      p.chrome.storage.local.get = async () => ({ gceSettings: settings });
+      await p.context.loadSettings();
+      assert.equal(p.element('range-select').value, range);
+      assert.equal(p.element('date-row').hidden, !dateFrom);
+      let saved;
+      p.chrome.storage.local.set = async value => { saved = value.gceSettings; };
+      await p.context.saveSettings();
+      assert.deepEqual(JSON.parse(JSON.stringify(saved)), settings);
+    }
   });
 
   test(`${target}: attachment control explains when it is available`, () => {
@@ -112,11 +123,100 @@ for (const target of ['chrome', 'firefox']) {
     p.element('format-select').value = 'md';
     p.context.updateMediaRowVisibility();
     assert.equal(p.element('include-media').disabled, true);
-    assert.equal(p.element('media-row').classList.contains('is-disabled'), true);
+    assert.equal(p.element('media-row').hidden, true);
     p.element('format-select').value = 'html';
     p.context.updateMediaRowVisibility();
     assert.equal(p.element('include-media').disabled, false);
-    assert.equal(p.element('media-row').classList.contains('is-disabled'), false);
+    assert.equal(p.element('media-row').hidden, false);
+  });
+
+  test(`${target}: a failed toolbar request shows the error and permits retry without broadcasting a second export`, async () => {
+    const p = page(target, 'popup.js');
+    let broadcasts = 0;
+    p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }], sendMessage() { broadcasts++; } };
+    p.chrome.runtime.sendMessage = async () => ({ success: false, error: 'An export is already running.' });
+    await p.context.triggerExport();
+    assert.equal(broadcasts, 0);
+    assert.equal(p.element('status-text').textContent, 'An export is already running.');
+    assert.equal(p.element('export-btn').disabled, false);
+  });
+
+  test(`${target}: delayed hydration cannot hide a newly requested export before its first progress update`, async () => {
+    const p = page(target, 'popup.js');
+    let hydrate, accept, requested;
+    p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
+    p.chrome.runtime.sendMessage = message => {
+      if (message.action === 'getExportJobs') return new Promise(resolve => { hydrate = resolve; });
+      requested = message;
+      return new Promise(resolve => { accept = resolve; });
+    };
+    const loading = p.context.loadExportJobs();
+    const starting = p.context.triggerExport();
+    await settle();
+    hydrate({ jobs: [] });
+    await loading;
+    assert.equal(p.element('export-btn').disabled, true);
+    assert.match(p.element('status-text').textContent, /Starting/);
+    accept({ success: true, jobId: requested.jobId });
+    await starting;
+    p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: requested.jobId, state: 'working', phase: 'history', text: 'Loading messages', percent: 15, startedAt: 20, revision: 1 } });
+    assert.equal(p.element('status-text').textContent, 'Loading messages');
+  });
+
+  test(`${target}: an unrelated legacy frame relay cannot overwrite a tracked export`, () => {
+    const p = page(target, 'popup.js');
+    p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: 'job-1', state: 'working', phase: 'history', text: 'Loading messages', percent: 15, startedAt: 10, revision: 1 } });
+    p.incoming.emit({ action: 'exportStateUpdate', state: 'error', text: 'Open a Chat conversation.' });
+    assert.equal(p.element('status-text').textContent, 'Loading messages');
+    assert.equal(p.element('export-btn').disabled, true);
+  });
+
+  test(`${target}: missing startup progress becomes a retryable error and late progress can still recover`, async () => {
+    const p = page(target, 'popup.js');
+    let requested;
+    p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
+    p.chrome.runtime.sendMessage = async message => { requested = message; return { success: true, jobId: message.jobId }; };
+    await p.context.triggerExport();
+    assert.ok(p.timers.size > 0, 'starting cannot spin forever without a job update');
+    [...p.timers.values()][0]();
+    assert.equal(p.element('export-btn').disabled, false);
+    assert.match(p.element('status-text').textContent, /No progress received/);
+    p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: requested.jobId, state: 'working', phase: 'history', text: 'Loading messages', percent: 15, startedAt: 20, revision: 1 } });
+    assert.equal(p.element('status-text').textContent, 'Loading messages');
+    assert.equal(p.element('export-btn').disabled, true);
+  });
+
+  test(`${target}: a late failed request cannot clear the state of a newer retry`, async () => {
+    const p = page(target, 'popup.js');
+    const requests = [];
+    p.chrome.tabs = { query: async () => [{ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }] };
+    p.chrome.runtime.sendMessage = message => new Promise(resolve => { requests.push({ message, resolve }); });
+    const first = p.context.triggerExport();
+    await settle();
+    [...p.timers.values()][0]();
+    const retry = p.context.triggerExport();
+    await settle();
+    requests[0].resolve({ success: false, error: 'Old request failed.' });
+    await first;
+    assert.equal(p.element('export-btn').disabled, true);
+    assert.match(p.element('status-text').textContent, /Starting/);
+    requests[1].resolve({ success: true, jobId: requests[1].message.jobId });
+    await retry;
+    p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: requests[1].message.jobId, state: 'working', phase: 'history', text: 'Loading retry', percent: 15, startedAt: 20, revision: 1 } });
+    assert.equal(p.element('status-text').textContent, 'Loading retry');
+    assert.equal(p.timers.size, 0);
+  });
+
+  test(`${target}: auto-export cannot start with older settings after the current settings fail to save`, async () => {
+    const p = page(target, 'popup.js');
+    const commands = [];
+    p.element('export-mode').checked = true;
+    p.chrome.storage.local.set = async () => { throw new Error('Storage unavailable'); };
+    p.chrome.runtime.sendMessage = async message => { commands.push(message); return { enabled: true }; };
+    await p.context.toggleExportMode();
+    assert.equal(commands.length, 0);
+    assert.equal(p.element('export-mode').checked, false);
+    assert.equal(p.element('settings-error').hidden, false);
   });
 
   test(`${target}: the real progress notification follows the theme and unsubscribes when dismissed`, async () => {
@@ -131,7 +231,6 @@ for (const target of ['chrome', 'firefox']) {
     const root = p.document.documentElement;
     const notification = root.children[0];
     assert.equal(notification.getAttribute('data-gce-theme'), 'dark');
-    assert.equal(notification.querySelector('.gce-percent').textContent, '15%');
     assert.equal(notification.querySelector('.gce-label').textContent, 'Collecting fixture messages');
     assert.equal(notification.querySelector('.gce-bar-wrap').getAttribute('aria-valuenow'), '15');
     assert.equal(notification.querySelector('.gce-close').getAttribute('aria-label'), 'Dismiss export notification');
@@ -151,7 +250,7 @@ for (const target of ['chrome', 'firefox']) {
     assert.equal(p.element('dark-mode').checked, true);
     p.incoming.emit({ action: 'exportJobUpdate', job: { jobId: 'job-1', state: 'working', phase: 'media',
       text: 'Downloading media', percent: 50, startedAt: 10, revision: 1 } });
-    assert.equal(p.element('status-value').textContent, '50%');
+    assert.equal(p.element('progress-track').getAttribute('aria-valuenow'), '50');
     let stored;
     p.chrome.storage.local.set = async value => { stored = value.gceTheme; };
     p.element('dark-mode').checked = false;
@@ -192,13 +291,12 @@ for (const target of ['chrome', 'firefox']) {
     };
     await p.context.loadExportJobs();
     assert.equal(p.element('status-text').textContent, 'Waiting for Chat');
-    assert.equal(p.element('status-value').textContent, 'Paused');
+    assert.equal(p.element('status-area').getAttribute('data-state'), 'paused');
     assert.equal(p.element('job-name').textContent, 'Fixture space');
     assert.equal(p.element('export-btn').disabled, true);
     assert.equal(p.element('return-to-chat').hidden, false);
     assert.equal(p.element('cancel-export').hidden, false);
     assert.equal(p.element('dismiss-status').hidden, true);
-    assert.equal(p.element('status-spinner').style.display, 'none');
     assert.equal(p.timers.size, 0, 'a paused export never disappears on a timer');
     await p.context.controlExportJob('focusExportJob');
     assert.ok(calls.some(msg => msg.action === 'focusExportJob' && msg.jobId === 'job-1'));

@@ -75,7 +75,6 @@ document.getElementById('filename').textContent = params.get('filename') || 'Exp
 const warning = document.getElementById('warning');
 warning.textContent = params.get('warning') || '';
 warning.hidden = !warning.textContent;
-document.getElementById('next').hidden = params.get('auto') !== '1';
 
 const changed = delta => { if (delta.id === downloadId) refreshDownload(); };
 const erased = id => { if (id === downloadId) refreshDownload(); };

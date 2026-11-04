@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const { installFrames } = require('./helpers/frame-fixture');
 
 function loadBackground(target = 'chrome', withZip = false, initialStorage = {}) {
   const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); },
@@ -37,6 +38,7 @@ function loadBackground(target = 'chrome', withZip = false, initialStorage = {})
   };
   const context = vm.createContext({
     chrome,
+    crypto: require('node:crypto').webcrypto,
     AbortController,
     Blob,
     console,
@@ -62,46 +64,56 @@ function loadBackground(target = 'chrome', withZip = false, initialStorage = {})
   return context;
 }
 
-test('content health check repairs a missing theme helper without reinjecting content.js', async () => {
-  const c = loadBackground();
-  let injected;
-  c.chrome.tabs.sendMessage = (_tabId, message, callback) => {
-    assert.equal(message.action, 'ping');
-    callback({ alive: true, themeReady: false, resultHostReady: true, frameId: 3 });
-  };
-  c.chrome.scripting.executeScript = async details => { injected = details; };
-  c.sleep = async () => {};
-
-  assert.equal(await c.ensureContentScript(7), true);
-  assert.deepEqual(JSON.parse(JSON.stringify(injected)), { target: { tabId: 7, frameIds: [3] }, files: ['theme.js'] });
-});
-
-test('content health check restores missing helper scripts in order', async () => {
-  const c = loadBackground();
-  let injected;
-  c.chrome.tabs.sendMessage = (_tabId, _message, callback) => {
-    callback({ alive: true, themeReady: false, resultHostReady: false, frameId: 0 });
-  };
-  c.chrome.scripting.executeScript = async details => { injected = details; };
-  c.sleep = async () => {};
-
-  assert.equal(await c.ensureContentScript(7), true);
-  assert.deepEqual(JSON.parse(JSON.stringify(injected)), { target: { tabId: 7, frameIds: [0] }, files: ['theme.js', 'result-host.js'] });
-});
-
-test('content health check installs the complete script set when ping fails', async () => {
-  const c = loadBackground();
-  let injected;
-  c.chrome.tabs.sendMessage = (_tabId, _message, callback) => callback(undefined);
-  c.chrome.scripting.executeScript = async details => { injected = details; };
-  c.sleep = async () => {};
-
-  assert.equal(await c.ensureContentScript(7), true);
-  assert.deepEqual(JSON.parse(JSON.stringify(injected)), {
-    target: { tabId: 7, allFrames: true },
-    files: ['theme.js', 'result-host.js', 'content.js']
+for (const target of ['chrome', 'firefox']) {
+  test(`${target}: conversation detection returns the Chat iframe’s name without starting an export`, async () => {
+    const c = loadBackground(target);
+    const fixture = installFrames(c, target, [{ id: 0, mail: true }, { id: 3, chat: true }]);
+    const response = await new Promise(resolve => c.chrome.runtime.onMessage.listener({ action: 'getConversation', tabId: 7 }, {}, resolve));
+    assert.equal(response.success, true);
+    assert.equal(response.name, 'Fixture room');
+    assert.equal(fixture.starts.length, 0);
   });
-});
+
+  test(`${target}: toolbar export starts only in the Chat iframe and repairs only its missing helper`, async () => {
+    const c = loadBackground(target);
+    const fixture = installFrames(c, target, [{ id: 0, mail: true }, { id: 3, chat: true, theme: false }]);
+    await c.triggerExport({ id: 7, url: 'https://mail.google.com/mail/u/0/' }, 'md');
+    assert.deepEqual(fixture.starts.map(start => start.frameId), [3]);
+    assert.deepEqual(fixture.injections, [{ frameIds: [3], files: ['theme.js'] }]);
+    assert.equal(fixture.messages.find(message => message.action === 'startExport').options.frameId, 3);
+  });
+
+  test(`${target}: cold-frame startup is shared so simultaneous requests cannot redeclare scripts`, async () => {
+    const c = loadBackground(target);
+    const fixture = installFrames(c, target, [{ id: 0, chat: true, loaded: false }]);
+    const results = await Promise.all([c.ensureContentScript(7), c.ensureContentScript(7)]);
+    assert.ok(results.every(frame => frame.frameId === 0));
+    assert.equal(fixture.injections.filter(injection => injection.files.includes('content.js')).length, 1);
+  });
+
+  test(`${target}: a rejected export is reported as a failure instead of a successful start`, async () => {
+    const c = loadBackground(target);
+    const fixture = installFrames(c, target, [{ id: 0, chat: true }]);
+    fixture.rejectStart = true;
+    await assert.rejects(c.triggerExport({ id: 7, url: 'https://chat.google.com/app/chat/ROOM' }, 'md'), /already running/i);
+    assert.equal(fixture.starts.length, 0);
+  });
+
+  test(`${target}: an unavailable message channel uses the same isolated-frame start handler`, async () => {
+    const c = loadBackground(target);
+    const fixture = installFrames(c, target, [{ id: 0, mail: true }, { id: 2, chat: true }]);
+    fixture.failMessages = true;
+    await c.triggerExport({ id: 7, url: 'https://mail.google.com/mail/u/0/' }, 'txt');
+    assert.deepEqual(fixture.starts.map(start => start.frameId), [2]);
+  });
+
+  test(`${target}: stale content code produces a refresh error without reinjecting over its declarations`, async () => {
+    const c = loadBackground(target);
+    const fixture = installFrames(c, target, [{ id: 0, chat: true, legacy: true }]);
+    await assert.rejects(c.ensureContentScript(7), /refresh.*Chat/i);
+    assert.equal(fixture.injections.length, 0);
+  });
+}
 
 test('safeResourceUrl permits HTTPS and safe packaged media paths', () => {
   const context = loadBackground();

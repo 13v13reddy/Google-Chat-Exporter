@@ -3,6 +3,7 @@
   "private": true,
   "version": "2.2.0",
   "scripts": {
+    "check:sources": "node scripts/check-sources.js",
     "test": "node --test tests/*.test.js",
     "benchmark": "node benchmarks/extraction.js",
     "build": "node scripts/build.js all",

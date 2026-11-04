@@ -79,10 +79,20 @@ async function loadSelectors() {
 
 function isInChatFrame() {
   if (!SEL) return false;
-  // Works for: normal tab, Gmail iframe (window.name), PWA standalone window
-  const byName = window.name === SEL.frameName;
-  const byContent = SEL.scrollContainers.some(sel => document.querySelector(sel));
-  return byName || byContent;
+  if (window.name === SEL.frameName) return true;
+  // Generic scroll containers such as [role="main"] also match Gmail inboxes.
+  return [SEL.mainMessages, SEL.messageGroups, SEL.deletedMessage]
+    .some(selector => selector && document.querySelector(selector));
+}
+
+function getExportHealth() {
+  const inChatFrame = isInChatFrame();
+  return {
+    protocol: 1, alive: true, inChatFrame,
+    name: inChatFrame ? getConversationName() : '',
+    themeReady: typeof GCETheme !== 'undefined' && typeof GCETheme.bind === 'function',
+    resultHostReady: typeof mountExportResult === 'function'
+  };
 }
 
 // ── Progress Overlay ────────────────────────────────────────
@@ -111,6 +121,20 @@ function bindProgressTheme(element) {
 function showProgress(text, percent, state = 'working') {
   lastExportProgress = { text, percent, state };
   progressJobId = exportJobId;
+  try {
+    renderProgress(text, percent, state);
+  } catch (error) {
+    console.warn('[GCE] Progress notification unavailable:', error);
+    try { hideProgress(); } catch { progressEl = null; }
+  }
+  // Status delivery must not depend on the Chat page accepting our overlay.
+  try {
+    chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent, state,
+      jobId: exportJobId, phase: exportPhase, conversationName: exportName }).catch(() => {});
+  } catch { /* The extension may have been reloaded. */ }
+}
+
+function renderProgress(text, percent, state) {
   if (progressIsResult) hideProgress();
   clearTimeout(progressHideTimer);
   progressHideTimer = null;
@@ -121,86 +145,46 @@ function showProgress(text, percent, state = 'working') {
     const style = document.createElement('style');
     style.textContent = `
       #gce-progress {
-        --gce-surface: #fff;
-        --gce-border: #e2e3de;
-        --gce-text: #292b27;
-        --gce-muted: #70736d;
-        --gce-hover: #f0f1ed;
-        --gce-track: #e2e3de;
-        --gce-accent: #356b83;
-        --gce-success: #4b6b52;
-        --gce-error: #a64d46;
-        position: fixed;
-        right: 18px;
-        bottom: 18px;
-        z-index: 2147483647;
-        width: min(312px, calc(100vw - 28px));
-        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        color: var(--gce-text);
-        pointer-events: auto;
+        --gce-surface: #fff; --gce-text: #202124; --gce-muted: #60656c;
+        --gce-line: #e3e5e8; --gce-hover: #f1f3f5; --gce-accent: #2463d4;
+        --gce-success: #237345; --gce-error: #b42318;
+        position: fixed; right: 20px; bottom: 20px; z-index: 2147483647;
+        width: min(320px, calc(100vw - 32px));
+        color: var(--gce-text); font: 13px/1.5 system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
       }
       #gce-progress, #gce-progress * { box-sizing: border-box; }
       #gce-progress[data-gce-theme="dark"] {
-        color-scheme: dark;
-        --gce-surface: #252825;
-        --gce-border: #3b403b;
-        --gce-text: #e7eae5;
-        --gce-muted: #adb4ac;
-        --gce-hover: #303530;
-        --gce-track: #3b403b;
-        --gce-accent: #a6c9d8;
-        --gce-success: #a6c5a8;
-        --gce-error: #e6a39b;
+        color-scheme: dark; --gce-surface: #202124; --gce-text: #f1f3f5; --gce-muted: #b0b5bd;
+        --gce-line: #3b3f45; --gce-hover: #30343a; --gce-accent: #8bb4ff;
+        --gce-success: #8ed5a7; --gce-error: #ffaaa0;
       }
-      .gce-card {
-        overflow: hidden;
-        border: 1px solid var(--gce-border);
-        border-radius: 8px;
-        background: var(--gce-surface);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, .045);
-        animation: gce-appear .16s ease-out;
-      }
-      @keyframes gce-appear { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-      .gce-topline { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 0; }
-      .gce-kicker { color: var(--gce-muted); font-size: 9px; font-weight: 650; letter-spacing: .1em; text-transform: uppercase; }
-      .gce-percent { color: var(--gce-muted); font: 10px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; }
-      .gce-main { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 3px 7px 8px 12px; }
-      .gce-spinner { width: 12px; height: 12px; flex: 0 0 auto; border: 1.5px solid var(--gce-track); border-top-color: var(--gce-accent); border-radius: 50%; animation: gce-spin .8s linear infinite; }
-      .gce-spinner.done { border-color: var(--gce-success); animation: none; }
-      .gce-spinner.error { border-color: var(--gce-error); animation: none; }
-      .gce-spinner.paused { border-top-color: var(--gce-muted); animation: none; }
-      @keyframes gce-spin { to { transform: rotate(360deg); } }
-      .gce-label { min-width: 0; flex: 1; color: var(--gce-text); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
-      .gce-close { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--gce-muted); font: inherit; cursor: pointer; }
-      .gce-close:hover { background: var(--gce-hover); color: var(--gce-text); }
-      .gce-close:focus-visible { outline: 2px solid var(--gce-accent); outline-offset: 1px; }
-      .gce-close svg { display: block; width: 14px; height: 14px; }
-      .gce-bar-wrap { height: 2px; background: var(--gce-track); }
-      .gce-bar { height: 100%; width: 0; background: var(--gce-accent); transition: width .24s ease, background .16s ease; }
-      .gce-bar.done { background: var(--gce-success); }
-      .gce-bar.error { background: var(--gce-error); }
-      @media (prefers-reduced-motion: reduce) { .gce-card, .gce-spinner, .gce-bar { animation-duration: .01ms; transition-duration: .01ms; } }
+      #gce-progress .gce-card { overflow: hidden; border: 1px solid var(--gce-line); border-radius: 8px; background: var(--gce-surface); }
+      #gce-progress .gce-main { display: flex; align-items: center; gap: 12px; padding: 12px; }
+      #gce-progress .gce-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+      #gce-progress .gce-close { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--gce-muted); font: inherit; cursor: pointer; }
+      #gce-progress .gce-close:hover { background: var(--gce-hover); color: var(--gce-text); }
+      #gce-progress .gce-close:focus-visible { outline: 2px solid var(--gce-accent); outline-offset: 2px; }
+      #gce-progress .gce-close svg { width: 14px; height: 14px; }
+      #gce-progress .gce-bar-wrap { height: 2px; background: var(--gce-line); }
+      #gce-progress .gce-bar { height: 100%; width: 0; background: var(--gce-accent); transition: width .2s ease; }
+      #gce-progress .gce-bar.done { background: var(--gce-success); }
+      #gce-progress .gce-bar.error { background: var(--gce-error); }
+      @media (prefers-reduced-motion: reduce) { #gce-progress .gce-bar { transition: none; } }
     `;
 
     progressEl.innerHTML = `
-      <section class="gce-card" aria-label="Export progress">
-        <div class="gce-topline">
-          <span class="gce-kicker">Export progress</span>
-          <span class="gce-percent" aria-label="2 percent complete">2%</span>
-        </div>
+      <section class="gce-card" aria-label="Chat export">
         <div class="gce-main">
-          <span class="gce-spinner" aria-hidden="true"></span>
-          <span class="gce-label" role="status" aria-live="polite">Preparing export…</span>
-          <button class="gce-close" type="button" title="Cancel export" aria-label="Cancel export">
+          <span class="gce-label" role="status" aria-live="polite"></span>
+          <button class="gce-close" type="button" aria-label="Cancel export" title="Cancel export">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
           </button>
         </div>
-        <div class="gce-bar-wrap" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="2"><div class="gce-bar"></div></div>
+        <div class="gce-bar-wrap" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100"><div class="gce-bar"></div></div>
       </section>`;
 
     progressEl.appendChild(style);
     progressThemeCleanup = bindProgressTheme(progressEl);
-    document.documentElement.appendChild(progressEl);
     progressEl.querySelector('.gce-close').addEventListener('click', () => {
       if (exportInProgress && exportController) {
         showProgress('Cancelling export...', 0);
@@ -214,28 +198,21 @@ function showProgress(text, percent, state = 'working') {
     });
   }
 
+  if (!progressEl.isConnected) document.documentElement.appendChild(progressEl);
+
   const label = progressEl.querySelector('.gce-label');
-  const percentLabel = progressEl.querySelector('.gce-percent');
   const progressTrack = progressEl.querySelector('.gce-bar-wrap');
   const bar = progressEl.querySelector('.gce-bar');
-  const spinner = progressEl.querySelector('.gce-spinner');
   const closeButton = progressEl.querySelector('.gce-close');
   const safePercent = Number.isFinite(Number(percent)) ? Math.max(0, Math.min(100, Number(percent))) : 0;
   const roundedPercent = Math.round(safePercent);
   progressEl.setAttribute('data-state', state);
 
   if (label) { label.textContent = text; label.title = text; }
-  if (percentLabel) {
-    percentLabel.textContent = `${roundedPercent}%`;
-    percentLabel.setAttribute('aria-label', `${roundedPercent} percent complete`);
-  }
   if (progressTrack) progressTrack.setAttribute('aria-valuenow', String(roundedPercent));
   if (bar) {
     bar.style.width = safePercent + '%';
     bar.className = 'gce-bar' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
-  }
-  if (spinner) {
-    spinner.className = 'gce-spinner' + (state === 'done' ? ' done' : state === 'error' ? ' error' : state === 'paused' ? ' paused' : '');
   }
   if (closeButton) {
     const closeLabel = exportInProgress && exportController ? 'Cancel export' : 'Dismiss export notification';
@@ -243,11 +220,6 @@ function showProgress(text, percent, state = 'working') {
     closeButton.setAttribute('aria-label', closeLabel);
   }
 
-  // Relay to background for popup display
-  try {
-    chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent, state,
-      jobId: exportJobId, phase: exportPhase, conversationName: exportName }).catch(() => {});
-  } catch { /* service worker may be inactive */ }
 }
 
 function hideProgress() {
@@ -276,21 +248,29 @@ function showExportResult(result, warning = '', auto = false) {
     showProgress(text, 100, 'done');
     return;
   }
-  hideProgress();
-  progressEl = document.createElement('div');
-  progressEl.id = 'gce-progress';
-  progressEl.style.cssText = 'position:fixed;bottom:20px;right:20px;width:min(328px,calc(100vw - 32px));z-index:2147483647;';
-  progressIsResult = true;
-  progressThemeCleanup = bindProgressTheme(progressEl);
-  const jobId = exportJobId;
-  progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, () => {
-    if (jobId) chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId }).catch(() => {});
+  try {
     hideProgress();
-  });
-  document.documentElement.appendChild(progressEl);
-  chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent: 100, state: 'done',
-    jobId: exportJobId, phase: 'download', conversationName: exportName,
-    downloadId: result.downloadId, filename: result.filename, warning, auto }).catch(() => {});
+    progressEl = document.createElement('div');
+    progressEl.id = 'gce-progress';
+    progressEl.style.cssText = 'position:fixed;bottom:20px;right:20px;width:min(328px,calc(100vw - 32px));z-index:2147483647;';
+    progressIsResult = true;
+    progressThemeCleanup = bindProgressTheme(progressEl);
+    const jobId = exportJobId;
+    progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, () => {
+      if (jobId) chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId }).catch(() => {});
+      hideProgress();
+    });
+    document.documentElement.appendChild(progressEl);
+  } catch (error) {
+    console.warn('[GCE] Saved-file notification unavailable:', error);
+    try { hideProgress(); } catch { progressEl = null; }
+    showProgress(text, 100, 'done');
+  }
+  try {
+    chrome.runtime.sendMessage({ action: 'exportStateUpdate', text, percent: 100, state: 'done',
+      jobId: exportJobId, phase: 'download', conversationName: exportName,
+      downloadId: result.downloadId, filename: result.filename, warning, auto }).catch(() => {});
+  } catch { /* A saved file stays successful if its extension context closes. */ }
 }
 
 function waitForDocumentVisible(signal = null) {
@@ -1406,11 +1386,12 @@ function isSameConversationUrl(a, b) {
 }
 
 // Resolves to 'done', 'empty', 'error', 'cancelled' or 'busy'.
-async function runExport({ format = 'txt', loadAll = true, includeMedia = true, dateFrom = '', incremental = false, sourceUrl = '', auto = false }) {
+async function runExport({ format = 'txt', loadAll = true, includeMedia = true, dateFrom = '', incremental = false, sourceUrl = '', auto = false, jobId = null }) {
   if (exportInProgress) return 'busy';
   exportInProgress = true;
   const controller = new AbortController();
   exportController = controller;
+  exportJobId = jobId;
   const { signal } = controller;
   let originalPosition = null;
   let conversationMatches = () => true;
@@ -1429,7 +1410,7 @@ async function runExport({ format = 'txt', loadAll = true, includeMedia = true, 
     const initialUrl = typeof location !== 'undefined' ? location.href : '';
     const initialPageScope = checkpointScopeFromPage(format, includeMedia);
     const initialName = getConversationName();
-    exportJobId = `job-${crypto.randomUUID()}`;
+    exportJobId ||= `job-${crypto.randomUUID()}`;
     exportPhase = 'history';
     exportName = initialName || 'Google Chat';
     showProgress('Preparing export…', 2);
@@ -1706,6 +1687,27 @@ function exportModeTick() {
 
 // ── Message Listener ─────────────────────────────────────────
 
+async function startExportRequest(options) {
+  await loadSelectors();
+  if (!isInChatFrame()) return { received: false, error: 'Open a conversation in Google Chat.' };
+  if (exportInProgress) {
+    return options.jobId && options.jobId === exportJobId
+      ? { received: true, jobId: exportJobId }
+      : { received: false, error: 'An export is already running in this conversation.' };
+  }
+  const jobId = /^job-[a-zA-Z0-9-]{1,96}$/.test(options.jobId) ? options.jobId : `job-${crypto.randomUUID()}`;
+  runExport({
+    format: options.format || 'txt',
+    loadAll: options.loadAll !== false,
+    includeMedia: options.includeMedia !== false,
+    dateFrom: options.dateFrom || '',
+    incremental: options.incremental === true,
+    sourceUrl: options.sourceUrl || '',
+    jobId
+  }).catch(error => console.error('[GCE] Export error:', error));
+  return { received: true, jobId };
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'getExportJob') {
     sendResponse({ jobId: exportInProgress ? exportJobId : null, phase: exportPhase, ...lastExportProgress });
@@ -1718,27 +1720,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   if (msg.action === 'ping') {
-    sendResponse({
-      alive: true,
-      inChatFrame: isInChatFrame(),
-      themeReady: typeof GCETheme !== 'undefined' && typeof GCETheme.bind === 'function',
-      resultHostReady: typeof mountExportResult === 'function',
-      frameId: sender?.frameId
-    });
+    sendResponse(getExportHealth());
     return false;
   }
 
   if (msg.action === 'startExport') {
-    runExport({
-      format: msg.format || 'txt',
-      loadAll: msg.loadAll !== false,
-      includeMedia: msg.includeMedia !== false,
-      dateFrom: msg.dateFrom || '',
-      incremental: msg.incremental === true,
-      sourceUrl: msg.sourceUrl || ''
-    });
-    sendResponse({ received: true });
-    return false;
+    startExportRequest(msg).then(sendResponse, error => sendResponse({ received: false, error: error.message }));
+    return true;
   }
 
   if (msg.action === 'exportModeChanged') {
@@ -1755,22 +1743,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   return false;
-});
-
-// ── Custom Event Listener (PWA fallback trigger) ─────────────
-// background.js injects a dispatchEvent when message passing fails in PWA windows
-
-window.addEventListener('gce:startExport', async (e) => {
-  const detail = e.detail || {};
-  await loadSelectors();
-  runExport({
-    format: detail.format || 'txt',
-    loadAll: detail.loadAll !== false,
-    includeMedia: detail.includeMedia !== false,
-    dateFrom: detail.dateFrom || '',
-    incremental: detail.incremental === true,
-    sourceUrl: detail.sourceUrl || ''
-  });
 });
 
 // ── Init ─────────────────────────────────────────────────────
