@@ -48,6 +48,12 @@ const test = base.extend({
       await page.waitForLoadState('domcontentloaded');
       return page;
     };
+    const setRange = async (page, range) => {
+      await page.locator('#incremental').uncheck();
+      await page.locator('#load-all').setChecked(!range.startsWith('visible'));
+      if (!['since', 'visible-since'].includes(range)) await page.locator('#date-from').fill('');
+      if (range === 'new') await page.locator('#incremental').check();
+    };
     const jobs = async () => (await message({ action: 'getExportJobs' })).jobs;
     const start = async page => {
       const previous = new Set((await jobs()).map(job => job.jobId));
@@ -62,7 +68,7 @@ const test = base.extend({
     };
     const download = async job => (await control.evaluate(id => chrome.downloads.search({ id }), job.downloadId))[0];
     try {
-      await use({ context, worker, extensionId, control, source, openSource, popup, message, jobs, start, finished, download, errors, png, api });
+      await use({ context, worker, extensionId, control, source, openSource, popup, message, jobs, start, finished, download, errors, png, api, setRange });
       expect(errors, 'extension and Chat pages must not throw uncaught errors').toEqual([]);
     }
     finally {

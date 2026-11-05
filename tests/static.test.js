@@ -28,7 +28,10 @@ test('popup and saved result use one local stylesheet and explicitly named contr
     const popup = fs.readFileSync(path.join(root, browser, 'popup.html'), 'utf8');
     const result = fs.readFileSync(path.join(root, browser, 'export-result.html'), 'utf8');
     for (const html of [popup, result]) assert.match(html, /href="ui\.css"/);
-    for (const id of ['format-select', 'range-select', 'date-from']) assert.ok(popup.includes(`for="${id}"`));
+    for (const id of ['format-select', 'load-all', 'date-from', 'incremental', 'include-media', 'export-mode', 'dark-mode']) {
+      const control = popup.match(new RegExp(`<[^>]+id="${id}"[^>]*>`))?.[0] || '';
+      assert.match(control, /aria-label="[^"]+"/, `${id} has an explicit accessible name`);
+    }
     for (const [html, file, pattern] of [
       [popup, 'popup.js', /\$\('([^']+)'\)/g],
       [result, 'export-result.js', /getElementById\('([^']+)'\)/g]

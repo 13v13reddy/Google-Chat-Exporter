@@ -91,7 +91,7 @@ Chrome and Firefox share source files and assets; only their manifests differ. K
 1. Navigate to [Google Chat](https://chat.google.com) or Gmail Chat.
 2. Click into any direct message or space.
 3. Choose either method:
-   - **Toolbar Popup**: Click the extension icon in your browser toolbar, select **Text (.txt)**, **Markdown (.md)**, or **HTML**, and click **Export**.
+   - **Toolbar Popup**: Click the extension icon in your browser toolbar, select **Plain Text**, **Markdown**, or **HTML + Media**, and click **Export**.
    - **Right-Click**: Right-click anywhere within the chat message area and select **Export Chat as TXT**, **Export Chat as Markdown**, or **Export Chat as HTML (with media)**.
 4. Progress appears in the bottom-right corner as the extension scrolls history, extracts messages, and bundles media.
 5. Your export file (`.txt`, `.md`, or `.zip`) will download automatically to your Downloads folder.
@@ -112,10 +112,11 @@ Status metadata for up to 20 recent finished exports is kept locally, along with
 
 ### Export options
 
-- **Messages → All messages and replies** loads history and the replies in each discovered thread.
-- **Since a date** reveals a date input and filters messages and replies after loading history. Older parents can have new replies, so their threads are still checked. A parent needed to explain an exported reply is labeled as context.
-- **New since last export** saves a per-conversation checkpoint and exports only newer messages on subsequent runs. The first run establishes a baseline; TXT, Markdown, HTML, and HTML-with-media modes use separate checkpoints.
-- **Loaded messages only** exports the rendered timeline and any already-open replies without opening threads or expanding collapsed replies. **Loaded since a date** also filters those rendered messages by date.
+- **Load Full History** loads all history and replies. Turn it off to export the rendered timeline and already-open replies without opening or expanding threads.
+- **Messages Since** optionally filters messages and replies by date. Leave it blank for the full selected history. This also works with Load Full History turned off; older parent context is retained when needed.
+- **New Since Last Export** establishes a baseline on the first run and exports newer messages on later runs. It uses full history and temporarily disables the history/date controls. Formats and attachment modes retain separate checkpoints.
+- **Include Media** downloads attachments for HTML. Other formats keep descriptive links.
+- **Dark Mode** applies to the popup and export notifications.
 - **Download attachments** is available for HTML. Text and Markdown retain attachment links.
 - **Dark mode** and **Auto-export on open** appear below the export settings. Dark mode applies to the popup and export notifications, remembers the choice locally, and follows the system appearance until a choice is saved.
 

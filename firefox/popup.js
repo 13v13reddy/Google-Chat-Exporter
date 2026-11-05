@@ -18,21 +18,20 @@ async function toggleDarkMode() {
   }
 }
 
-// The UI has one range control; stored flags stay compatible with context-menu
-// and automatic exports, including loaded messages filtered by date.
+// Main’s original controls retain the current settings contract for toolbar,
+// context-menu and automatic exports.
 let settingsRevision = 0;
 let settingsQueue = Promise.resolve();
 let conversationReady = false;
-const datedRange = range => range === 'since' || range === 'visible-since';
 
 function readSettings() {
-  const range = $('range-select').value;
+  const incremental = $('incremental').checked === true;
   return {
     format: $('format-select').value,
-    loadAll: range !== 'visible' && range !== 'visible-since',
+    loadAll: incremental || $('load-all').checked,
     includeMedia: $('include-media').checked,
-    dateFrom: datedRange(range) ? $('date-from').value : '',
-    incremental: range === 'new'
+    dateFrom: incremental ? '' : $('date-from').value,
+    incremental
   };
 }
 
@@ -44,9 +43,9 @@ async function loadSettings() {
     if (['txt', 'md', 'html'].includes(settings.format)) $('format-select').value = settings.format;
     $('include-media').checked = settings.includeMedia !== false;
     $('date-from').value = settings.dateFrom || '';
-    $('range-select').value = settings.incremental ? 'new' : settings.loadAll === false
-      ? (settings.dateFrom ? 'visible-since' : 'visible') : (settings.dateFrom ? 'since' : 'all');
-    updateRangeControls();
+    $('load-all').checked = settings.loadAll !== false;
+    $('incremental').checked = settings.incremental === true;
+    updateIncrementalControls();
     updateMediaRowVisibility();
   } catch {
     $('settings-error').textContent = 'Could not load saved settings.';
@@ -68,15 +67,14 @@ function saveSettings() {
 
 function updateMediaRowVisibility() {
   const available = $('format-select').value === 'html';
-  $('media-row').hidden = !available;
+  $('media-row').style.opacity = available ? '1' : '0.45';
   $('include-media').disabled = !available;
 }
 
-function updateRangeControls() {
-  const dated = datedRange($('range-select').value);
-  $('date-row').hidden = !dated;
-  $('date-from').disabled = !dated;
-  $('date-from').required = dated;
+function updateIncrementalControls() {
+  const incremental = $('incremental').checked;
+  $('load-all').disabled = incremental;
+  $('date-from').disabled = incremental;
 }
 
 async function detectConversation() {
@@ -88,7 +86,7 @@ async function detectConversation() {
     if (!response?.success) throw new Error(response?.error || 'Could not connect to Chat. Refresh the Chat tab and retry.');
     setConvStatus(true, response.name || 'Google Chat');
   } catch (error) {
-    setConvStatus(false, 'Google Chat');
+    setConvStatus(false, 'Not on Google Chat');
     $('connection-error').textContent = error.message;
     $('connection-error').hidden = false;
   }
@@ -96,6 +94,8 @@ async function detectConversation() {
 
 function setConvStatus(ready, name) {
   conversationReady = ready;
+  $('conv-dot').className = 'conv-dot' + (ready ? '' : ' offline');
+  $('conv-name').className = 'conv-name' + (ready ? '' : ' muted');
   $('conv-name').textContent = name;
   $('conv-name').title = name;
   $('connection-error').hidden = ready;
@@ -156,7 +156,6 @@ async function triggerExport() {
   }, 8000);
   try {
     const settings = readSettings();
-    if (datedRange($('range-select').value) && !settings.dateFrom) throw new Error('Choose a start date.');
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.url?.match(/^https:\/\/(chat|mail)\.google\.com(?:\.mcas\.ms)?(?:\/|$)/)) throw new Error('Open a conversation in Google Chat.');
     const response = await chrome.runtime.sendMessage({ action: 'popupExport', jobId, tabId: tab.id, format: settings.format, settings });
@@ -181,14 +180,16 @@ function setExporting(label = 'Exporting') {
 
   const btn = $('export-btn');
   btn.disabled = true;
-  btn.textContent = label + '…';
+  btn.classList.add('is-working');
+  $('export-button-text').textContent = label + '…';
 }
 
 function resetBtn() {
   isExporting = false;
   const btn = $('export-btn');
   btn.disabled = !conversationReady;
-  btn.textContent = 'Export';
+  btn.classList.remove('is-working');
+  $('export-button-text').textContent = 'Export Current Conversation';
 }
 
 // ── Status / Progress ────────────────────────────────────────
@@ -217,9 +218,11 @@ function showExportResult(result) {
     hideExportResult(true);
     if (result.jobId) dismissExportJob(result.jobId);
   });
+  $('export-result').scrollIntoView({ block: 'start' });
 }
 
 function showStatus(text, percent, state = 'working') {
+  const reveal = !$('status-area').classList.contains('visible');
   clearTimeout(statusHideTimer);
   statusHideTimer = null;
   hideExportResult();
@@ -233,6 +236,7 @@ function showStatus(text, percent, state = 'working') {
   const bar = $('progress-bar');
   bar.style.width = safePercent + '%';
   bar.className = 'progress-bar' + (state === 'done' ? ' done' : state === 'error' ? ' error' : '');
+  if (reveal) $('status-area').scrollIntoView({ block: 'start' });
 }
 
 function hideStatus() {
@@ -345,7 +349,8 @@ chrome.runtime.onMessage.addListener((msg) => {
 document.addEventListener('DOMContentLoaded', () => {
   $('export-btn').addEventListener('click', triggerExport);
   $('format-select').addEventListener('change', () => { updateMediaRowVisibility(); saveSettings(); });
-  $('range-select').addEventListener('change', () => { updateRangeControls(); saveSettings(); });
+  $('load-all').addEventListener('change', saveSettings);
+  $('incremental').addEventListener('change', () => { updateIncrementalControls(); saveSettings(); });
   $('include-media').addEventListener('change', saveSettings);
   $('date-from').addEventListener('change', saveSettings);
   $('export-mode').addEventListener('change', toggleExportMode);

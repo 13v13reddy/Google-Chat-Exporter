@@ -35,6 +35,7 @@ class Element {
   click() { if (!this.disabled) this.emit('click'); }
   appendChild(child) { this.children.push(child); child.parent = this; child.isConnected = true; return child; }
   remove() { this.isConnected = false; if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this); }
+  scrollIntoView() { this.wasScrolledIntoView = true; }
   getBoundingClientRect() { return { height: 144 }; }
 }
 
@@ -89,7 +90,9 @@ function page(target, file, options = {}) {
   if (file === 'popup.js') {
     element('export-result').hidden = true;
     element('format-select').value = 'txt';
-    element('range-select').value = 'all';
+    element('load-all').checked = true;
+    element('incremental').checked = false;
+    element('date-from').value = '';
     element('include-media').checked = true;
     load('result-host.js');
   }
@@ -133,7 +136,7 @@ for (const target of ['chrome', 'firefox']) {
     assert.match(p.element('status-text').textContent, /Reload the extension/i);
   });
 
-  test(`${target}: the range control round-trips existing export settings without losing a mode`, async () => {
+  test(`${target}: main controls round-trip existing export settings without losing a mode`, async () => {
     for (const [range, loadAll, incremental, dateFrom] of [
       ['all', true, false, ''], ['since', true, false, '2026-10-12'],
       ['new', true, true, ''], ['visible', false, false, ''], ['visible-since', false, false, '2026-10-12']
@@ -142,8 +145,11 @@ for (const target of ['chrome', 'firefox']) {
       const settings = { format: 'md', loadAll, incremental, dateFrom, includeMedia: false };
       p.chrome.storage.local.get = async () => ({ gceSettings: settings });
       await p.context.loadSettings();
-      assert.equal(p.element('range-select').value, range);
-      assert.equal(p.element('date-row').hidden, !dateFrom);
+      assert.equal(p.element('load-all').checked, loadAll);
+      assert.equal(p.element('incremental').checked, incremental);
+      assert.equal(p.element('date-from').value, dateFrom);
+      assert.equal(p.element('load-all').disabled, incremental);
+      assert.equal(p.element('date-from').disabled, incremental);
       let saved;
       p.chrome.storage.local.set = async value => { saved = value.gceSettings; };
       await p.context.saveSettings();
@@ -156,11 +162,11 @@ for (const target of ['chrome', 'firefox']) {
     p.element('format-select').value = 'md';
     p.context.updateMediaRowVisibility();
     assert.equal(p.element('include-media').disabled, true);
-    assert.equal(p.element('media-row').hidden, true);
+    assert.equal(p.element('media-row').style.opacity, '0.45');
     p.element('format-select').value = 'html';
     p.context.updateMediaRowVisibility();
     assert.equal(p.element('include-media').disabled, false);
-    assert.equal(p.element('media-row').hidden, false);
+    assert.equal(p.element('media-row').style.opacity, '1');
   });
 
   test(`${target}: a failed toolbar request shows the error and permits retry without broadcasting a second export`, async () => {

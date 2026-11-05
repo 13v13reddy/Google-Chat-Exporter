@@ -59,7 +59,7 @@ test('loaded-only export leaves threads closed and captures only rendered parent
   await app.openSource();
   const popup = await app.popup();
   await popup.locator('#format-select').selectOption('md');
-  await popup.locator('#range-select').selectOption('visible');
+  await app.setRange(popup, 'visible');
   const result = await app.finished(await app.start(popup));
   const text = await fs.readFile((await app.download(result)).filename, 'utf8');
   expect(new Set(ids(text))).toEqual(new Set(['parent-4', 'parent-5', 'parent-6', 'parent-7']));
@@ -73,7 +73,7 @@ test('loaded-only export includes already-open replies without expanding collaps
   await expect(app.source.locator('.hSo9Ub')).toBeVisible();
   const popup = await app.popup();
   await popup.locator('#format-select').selectOption('md');
-  await popup.locator('#range-select').selectOption('visible');
+  await app.setRange(popup, 'visible');
   const result = await app.finished(await app.start(popup));
   const text = await fs.readFile((await app.download(result)).filename, 'utf8');
   expect(new Set(ids(text))).toEqual(new Set(['parent-4', 'parent-5', 'parent-6', 'parent-7', 'parent-6-reply-2']));
@@ -118,7 +118,7 @@ test('incremental checkpoints advance after a native save and skip previously ex
   await app.openSource();
   const popup = await app.popup();
   await popup.locator('#format-select').selectOption('md');
-  await popup.locator('#range-select').selectOption('new');
+  await app.setRange(popup, 'new');
   const baseline = await app.finished(await app.start(popup));
   expect(baseline.state).toBe('done');
   const checkpoint = await app.control.evaluate(async () => Object.entries(await chrome.storage.local.get(null)).filter(([key]) => key.startsWith('gceCheckpoint:')));
@@ -136,7 +136,7 @@ test('incomplete replies warn in the file and leave the incremental checkpoint u
   await app.openSource('?stuck=1');
   const popup = await app.popup();
   await popup.locator('#format-select').selectOption('md');
-  await popup.locator('#range-select').selectOption('new');
+  await app.setRange(popup, 'new');
   const result = await app.finished(await app.start(popup));
   expect(result.warning).toContain('could not be completely loaded');
   const text = await fs.readFile((await app.download(result)).filename, 'utf8');
@@ -149,7 +149,7 @@ test('a failed attachment is reported without advancing the checkpoint', async (
   await app.openSource('?media=1&mediaFail=1');
   const popup = await app.popup();
   await popup.locator('#format-select').selectOption('html');
-  await popup.locator('#range-select').selectOption('new');
+  await app.setRange(popup, 'new');
   const result = await app.finished(await app.start(popup));
   expect(result.warning).toMatch(/media|attachment/i);
   expect(await app.control.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter(key => key.startsWith('gceCheckpoint:')))).toEqual([]);
@@ -159,7 +159,7 @@ test('date filtering retains the older parent context for recent replies', async
   await app.openSource();
   const popup = await app.popup();
   await popup.locator('#format-select').selectOption('md');
-  await popup.locator('#range-select').selectOption('since');
+  await app.setRange(popup, 'since');
   await popup.locator('#date-from').fill('2026-01-09');
   const result = await app.finished(await app.start(popup));
   const text = await fs.readFile((await app.download(result)).filename, 'utf8');
@@ -197,7 +197,7 @@ test('reloading the collector produces a persistent interruption and no partial 
 test('closing the collector interrupts the job without a download or checkpoint', async ({ app }) => {
   await app.openSource('?delay=2000');
   const popup = await app.popup();
-  await popup.locator('#range-select').selectOption('new');
+  await app.setRange(popup, 'new');
   const requested = await app.start(popup);
   await expect.poll(async () => (await app.jobs()).find(job => job.jobId === requested)?.phase).toBe('history');
   const current = (await app.jobs()).find(job => job.jobId === requested);
@@ -273,7 +273,7 @@ test('a service-worker restart recovers collection and completes its native down
 test('a blocked download leaves the checkpoint unchanged and permits a retry', async ({ app }, info) => {
   await app.openSource();
   const popup = await app.popup();
-  await popup.locator('#range-select').selectOption('new');
+  await app.setRange(popup, 'new');
   const devtools = await app.context.browser().newBrowserCDPSession();
   await devtools.send('Browser.setDownloadBehavior', { behavior: 'deny' });
   const blocked = await app.finished(await app.start(popup));
@@ -289,7 +289,7 @@ test('a blocked download leaves the checkpoint unchanged and permits a retry', a
 test('a missing exported file disables Open and leaves useful error guidance', async ({ app }) => {
   await app.openSource();
   const popup = await app.popup();
-  await popup.locator('#range-select').selectOption('visible');
+  await app.setRange(popup, 'visible');
   const result = await app.finished(await app.start(popup));
   const card = popup.frameLocator('#export-result iframe');
   await expect(card.locator('#open')).toBeEnabled();

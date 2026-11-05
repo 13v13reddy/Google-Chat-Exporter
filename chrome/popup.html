@@ -7,54 +7,137 @@
   <link rel="stylesheet" href="ui.css">
 </head>
 <body class="popup-body">
-  <header class="app-header"><h1>Google Chat Exporter</h1></header>
-  <div class="conversation-bar"><span id="conv-name">Google Chat</span></div>
-  <main>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-inner">
+      <div class="logo-wrap">
+        <img src="icons/icon48.png" alt="Google Chat Exporter">
+      </div>
+      <div class="header-text">
+        <h1>Google Chat Exporter</h1>
+        <p>Export your conversations locally &amp; privately</p>
+      </div>
+      <span class="version-badge">v2.2.0</span>
+    </div>
+  </div>
+
+  <!-- Conversation status bar -->
+  <div class="conv-bar" id="conv-bar">
+    <div class="conv-dot offline" id="conv-dot"></div>
+    <span class="conv-name muted" id="conv-name">Not on Google Chat</span>
+  </div>
+
+  <!-- Body -->
+  <main class="body">
     <p class="error" id="connection-error" role="alert" hidden></p>
 
-    <div class="fields">
-      <div class="field">
-        <label for="format-select">Format</label>
-        <select id="format-select">
-          <option value="txt">Text (.txt)</option>
-          <option value="md">Markdown (.md)</option>
-          <option value="html">HTML</option>
+    <!-- Options -->
+    <div class="option-group">
+      <div class="option-row">
+        <span class="option-icon">📁</span>
+        <div class="option-label">
+          Export Format
+          <div class="option-sub">Choose your output format</div>
+        </div>
+        <select class="format-select" id="format-select" aria-label="Export Format">
+          <option value="txt">📄 Plain Text</option>
+          <option value="md">📝 Markdown</option>
+          <option value="html">🌐 HTML + Media</option>
         </select>
       </div>
-      <div class="field">
-        <label for="range-select">Messages</label>
-        <select id="range-select">
-          <option value="all">All messages and replies</option>
-          <option value="since">Since a date…</option>
-          <option value="new">New since last export</option>
-          <option value="visible">Loaded messages only</option>
-          <option value="visible-since">Loaded since a date…</option>
-        </select>
+
+      <div class="option-row">
+        <span class="option-icon">📜</span>
+        <div class="option-label">
+          Load Full History
+          <div class="option-sub">Load all messages and thread replies</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="load-all" aria-label="Load Full History" checked>
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
       </div>
-      <div class="field" id="date-row" hidden>
-        <label for="date-from">From</label>
-        <input type="date" id="date-from" disabled>
+
+      <div class="option-row" id="date-row">
+        <span class="option-icon">📅</span>
+        <div class="option-label">
+          Messages Since
+          <div class="option-sub">Blank means full history</div>
+        </div>
+        <input class="date-input" type="date" id="date-from" aria-label="Export messages since">
       </div>
-      <label class="check-row" id="media-row" hidden>
-        <span>Download attachments</span>
-        <input type="checkbox" id="include-media" checked disabled>
-      </label>
+
+      <div class="option-row">
+        <div class="option-label">
+          New Since Last Export
+          <div class="option-sub">First run establishes a baseline. Saves a new file.</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="incremental" aria-label="New Since Last Export">
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+      </div>
+
+      <div class="option-row" id="media-row">
+        <span class="option-icon">🖼️</span>
+        <div class="option-label">
+          Include Media
+          <div class="option-sub">Download images, audio, files</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="include-media" aria-label="Include Media" checked>
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+      </div>
+    </div>
+
+    <div class="option-group">
+      <div class="option-row">
+        <span class="option-icon">🔁</span>
+        <div class="option-label">
+          Auto-Export on Open
+          <div class="option-sub">Exports each channel you open. Ends after 10 min without a switch.</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="export-mode" aria-label="Auto-Export on Open">
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+      </div>
+      <div class="option-row">
+        <span class="option-icon" aria-hidden="true">🌙</span>
+        <div class="option-label">
+          Dark Mode
+          <div class="option-sub">Apply to the extension and notifications</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="dark-mode" aria-label="Dark mode">
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+      </div>
     </div>
     <p class="error" id="settings-error" role="alert" hidden></p>
-
-    <div class="options">
-      <label class="check-row"><span>Dark mode</span><input type="checkbox" id="dark-mode"></label>
-      <label class="check-row"><span>Auto-export on open</span><input type="checkbox" id="export-mode"></label>
-    </div>
     <p class="error" id="theme-error" role="alert" hidden></p>
-    <button class="primary export-btn" id="export-btn" type="button" disabled>Export</button>
 
+    <!-- Export button -->
+    <button class="export-btn" id="export-btn" type="button" disabled>
+      <svg class="download-icon" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+        <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+      </svg>
+      <svg class="loading-icon" aria-hidden="true" viewBox="0 0 24 24"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+      <span id="export-button-text">Export Current Conversation</span>
+    </button>
+
+    <!-- Progress / status -->
     <section class="status-area" id="status-area" role="status" aria-live="polite">
       <div class="job-name" id="job-name" hidden></div>
-      <span id="status-text"></span>
-      <div class="progress-track" id="progress-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100">
-        <div class="progress-bar" id="progress-bar"></div>
-      </div>
+      <div class="status-text"><span class="status-spinner" id="status-spinner" aria-hidden="true"></span><span id="status-text"></span></div>
+      <div class="progress-bar-wrap" id="progress-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100"><div class="progress-bar" id="progress-bar"></div></div>
       <div class="job-controls" id="job-controls" hidden>
         <button type="button" id="return-to-chat">Return to Chat</button>
         <button type="button" id="cancel-export">Cancel</button>
@@ -62,7 +145,21 @@
       </div>
     </section>
     <div id="export-result" hidden></div>
+
+    <!-- Tip -->
+    <div class="tip">
+      <span class="tip-icon">💡</span>
+      <span>You can also right-click anywhere inside a Google Chat conversation and choose <strong>Export Chat as TXT</strong>, <strong>Export Chat as Markdown</strong>, or <strong>Export Chat as HTML</strong>.</span>
+    </div>
+
   </main>
+
+  <!-- Footer -->
+  <div class="footer">
+    Crafted with <span class="heart">♥</span> by <a href="https://vishwas.me" target="_blank">Vishwas R</a>
+    &nbsp;·&nbsp; 100% private &amp; open source
+  </div>
+
   <script src="theme.js"></script>
   <script src="result-host.js"></script>
   <script src="popup.js"></script>

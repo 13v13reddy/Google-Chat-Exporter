@@ -153,36 +153,121 @@ function renderProgress(text, percent, state) {
     const style = document.createElement('style');
     style.textContent = `
       #gce-progress {
-        --gce-surface: #fff; --gce-text: #202124; --gce-muted: #60656c;
-        --gce-line: #e3e5e8; --gce-hover: #f1f3f5; --gce-accent: #2463d4;
-        --gce-success: #237345; --gce-error: #b42318;
-        position: fixed; right: 20px; bottom: 20px; z-index: 2147483647;
-        width: min(320px, calc(100vw - 32px));
-        color: var(--gce-text); font: 13px/1.5 system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        z-index: 2147483647;
+        font-family: 'Google Sans', Roboto, sans-serif;
+        pointer-events: auto;
+        color: var(--gce-text);
+        --gce-surface:#fff; --gce-text:#3c4043; --gce-line:#e0e0e0;
+        --gce-muted:#80868b; --gce-hover:#f1f3f4; --gce-accent:#1a73e8;
+        --gce-success:#34a853; --gce-error:#ea4335;
+        width:320px; max-width:calc(100vw - 48px);
       }
-      #gce-progress, #gce-progress * { box-sizing: border-box; }
-      #gce-progress[data-gce-theme="dark"] {
-        color-scheme: dark; --gce-surface: #202124; --gce-text: #f1f3f5; --gce-muted: #b0b5bd;
-        --gce-line: #3b3f45; --gce-hover: #30343a; --gce-accent: #8bb4ff;
-        --gce-success: #8ed5a7; --gce-error: #ffaaa0;
+      #gce-progress .gce-card {
+        background: var(--gce-surface);
+        border-radius: 14px;
+        box-shadow: 0 8px 30px rgba(0,0,0,0.15), 0 2px 8px rgba(0,0,0,0.08);
+        width: 100%;
+        overflow: hidden;
+        animation: gce-slide-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
       }
-      #gce-progress .gce-card { overflow: hidden; border: 1px solid var(--gce-line); border-radius: 8px; background: var(--gce-surface); }
-      #gce-progress .gce-main { display: flex; align-items: center; gap: 12px; padding: 12px; }
-      #gce-progress .gce-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-      #gce-progress .gce-close { min-height: 32px; flex: 0 0 auto; padding: 4px 8px; border: 1px solid var(--gce-line); border-radius: 5px; background: transparent; color: var(--gce-text); font: inherit; cursor: pointer; }
-      #gce-progress .gce-close:hover { background: var(--gce-hover); color: var(--gce-text); }
-      #gce-progress .gce-close:focus-visible { outline: 2px solid var(--gce-accent); outline-offset: 2px; }
-      #gce-progress .gce-bar-wrap { height: 2px; background: var(--gce-line); }
-      #gce-progress .gce-bar { height: 100%; width: 0; background: var(--gce-accent); }
+      @keyframes gce-slide-in {
+        from { transform: translateY(20px); opacity: 0; }
+        to { transform: translateY(0); opacity: 1; }
+      }
+      #gce-progress .gce-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 14px 16px 10px;
+      }
+      #gce-progress .gce-spinner {
+        width: 18px;
+        height: 18px;
+        border: 2.5px solid #e0e0e0;
+        border-top-color: #1a73e8;
+        border-radius: 50%;
+        animation: gce-spin 0.7s linear infinite;
+        flex-shrink: 0;
+        transition: border-color 0.3s;
+      }
+      #gce-progress .gce-spinner.done { border-color: #34a853; border-top-color: #34a853; animation: none; }
+      #gce-progress .gce-spinner.error { border-color: #ea4335; border-top-color: #ea4335; animation: none; }
+      @keyframes gce-spin { to { transform: rotate(360deg); } }
+      #gce-progress .gce-label {
+        font-size: 13px;
+        color: var(--gce-text);
+        flex: 1;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-weight: 500;
+      }
+      #gce-progress .gce-close {
+        background: none;
+        border: none;
+        font-size: 18px;
+        color: var(--gce-muted);
+        cursor: pointer;
+        padding: 0 2px;
+        line-height: 1;
+        border-radius: 4px;
+        flex-shrink: 0;
+      }
+      #gce-progress .gce-close:hover { color: var(--gce-text); background: var(--gce-hover); }
+      #gce-progress .gce-bar-wrap { height: 4px; background: #e8eaed; }
+      #gce-progress .gce-bar {
+        height: 100%;
+        background: var(--gce-accent);
+        width: 0%;
+        transition: width 0.4s ease, background 0.3s ease;
+        border-radius: 0 2px 2px 0;
+      }
       #gce-progress .gce-bar.done { background: var(--gce-success); }
       #gce-progress .gce-bar.error { background: var(--gce-error); }
-    `;
+
+      #gce-progress[data-gce-theme="dark"] {
+        color-scheme:dark; --gce-surface:#202124; --gce-text:#f1f3f5;
+        --gce-line:#41464e; --gce-muted:#a0a6af; --gce-hover:#30343a;
+        --gce-accent:#8ab4f8; --gce-success:#8ed5a7; --gce-error:#ffaaa0;
+      }
+      #gce-progress .gce-spinner { border-color:var(--gce-line); border-top-color:var(--gce-accent); }
+      #gce-progress .gce-bar-wrap { background:var(--gce-hover); }
+      #gce-progress[data-state="done"] .gce-spinner { animation:none; border-color:var(--gce-success); }
+      #gce-progress[data-state="error"] .gce-spinner { animation:none; border-color:var(--gce-error); }
+      #gce-progress[data-state="paused"] .gce-spinner { animation:none; border-color:var(--gce-muted); }
+      #gce-progress .gce-close:focus-visible { outline:2px solid var(--gce-accent); outline-offset:3px; }
+      @media (prefers-reduced-motion:reduce) { #gce-progress * { animation:none !important; transition:none !important; } }
+`;
 
     progressEl.innerHTML = `
       <section class="gce-card" aria-label="Chat export">
-        <div class="gce-main">
-          <span class="gce-label" role="status" aria-live="polite"></span>
-          <button class="gce-close" type="button" aria-label="Cancel export">Cancel</button>
+        <div class="gce-header">
+          <div class="gce-logo" style="width:22px;height:22px;flex-shrink:0;display:flex;align-items:center;">
+            <svg width="22" height="22" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" style="border-radius:4px;">
+              <rect width="512" height="512" rx="40" fill="#f8f9fa"/>
+              <g transform="translate(56, 56) scale(1.25)">
+                <path d="M76.37 0.51l0.01 76.47L0 76.96V20.77c0.567-3.973 1.743-7.31 3.53-10.01C7.937 4.08 14.343 0.717 22.75 0.67 40.523 0.577 58.397 0.523 76.37 0.51z" fill="#0066da"/>
+                <path d="M76.37 0.51l157.42 0.02c0.332 0 0.653 0.101 0.92 0.29l0.37 0.27c-0.107 0.04-0.197 0.083-0.27 0.13a0.297 0.297 0 00-0.17 0.28l-0.02 75.51H76.41l-0.03-0.03L76.37 0.51z" fill="#fbbc04"/>
+                <path d="M235.08 1.09l75.45 75.68-75.91 0.24 0.02-75.51c0-0.127 0.057-0.22 0.17-0.28 0.073-0.047 0.163-0.09 0.27-0.13z" fill="#ea4335"/>
+                <path d="M0 76.96l76.38 0.02 0.03 0.03 0.02 105.68L0 182.67V76.96z" fill="#2684fc"/>
+                <path d="M310.53 76.77l0.47 0.34v161.9c-1.773 9.687-6.793 15.943-15.06 18.77-2.947 1.013-7.29 1.513-13.03 1.5-37.26-0.06-74.9-0.117-112.92-0.17-5.52-0.007-11.12 0.033-16.8 0.12-0.313 0.007-0.58 0.12-0.8 0.34a15823.329 15823.329 0 00-56 56.02c-2.87 2.89-6.12 4.5-10.24 3.89-3.84-0.567-6.67-2.547-8.49-5.94-0.767-1.44-1.157-4.067-1.17-7.88-0.047-15.46-0.063-30.97-0.05-46.53l-0.01-38.28 37.78-37.78c0.332-0.333 0.786-0.52 1.26-0.52l118.3 0.04c0.455 0 0.83-0.375 0.83-0.83l-0.03-104.75h0.05l75.91-0.24z" fill="#00ac47"/>
+                <path d="M76.43 182.69v38.16l0.01 38.28c-15.98 0.093-31.823 0.123-47.53 0.09-6.547-0.013-11.263-0.527-14.15-1.54-8.093-2.827-13.013-9.093-14.76-18.8v-56.21l76.43 0.02z" fill="#00832d"/>
+              </g>
+              <circle cx="380" cy="380" r="90" fill="#ffffff" />
+              <circle cx="380" cy="380" r="85" fill="#ffffff" stroke="#e8eaed" stroke-width="5" />
+              <g transform="translate(345, 325)">
+                <path d="M35,0 L35,65" stroke="#1a73e8" stroke-width="18" stroke-linecap="round" />
+                <path d="M5,40 L35,70 L65,40" stroke="#1a73e8" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+                <rect x="5" y="85" width="60" height="12" rx="6" fill="#34a853" />
+              </g>
+            </svg>
+          </div>
+          <div class="gce-spinner"></div>
+          <span class="gce-label" role="status" aria-live="polite">Initializing...</span>
+          <button class="gce-close" type="button" aria-label="Cancel export" title="Cancel export">&times;</button>
         </div>
         <div class="gce-bar-wrap" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100"><div class="gce-bar"></div></div>
       </section>`;
@@ -227,7 +312,7 @@ function renderProgress(text, percent, state) {
     closeButton.hidden = mirroredExportJob?.phase === 'packaging' && mirroredExportJob.state === 'working';
     closeButton.title = closeLabel;
     closeButton.setAttribute('aria-label', closeLabel);
-    closeButton.textContent = canCancel ? 'Cancel' : 'Dismiss';
+    closeButton.textContent = '×';
   }
 
 }
@@ -262,7 +347,7 @@ function renderExportResult(result, warning = '', auto = false, jobId = exportJo
     hideProgress();
     progressEl = document.createElement('div');
     progressEl.id = 'gce-progress';
-    progressEl.style.cssText = 'position:fixed;bottom:20px;right:20px;width:min(328px,calc(100vw - 32px));z-index:2147483647;';
+    progressEl.style.cssText = 'position:fixed;bottom:24px;right:24px;width:min(320px,calc(100vw - 48px));z-index:2147483647;';
     progressIsResult = true;
     progressThemeCleanup = bindProgressTheme(progressEl);
     progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, () => {

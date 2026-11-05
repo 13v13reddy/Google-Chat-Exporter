@@ -26,6 +26,14 @@ Theme tests cover system defaults, saved light/dark choices, updates across popu
 
 These tests mock `chrome.*` APIs. They do not prove that an installed extension has the required permissions, selects the right iframe, remains active through browser worker suspension, or successfully fetches authenticated Google attachments.
 
+## Main frontend restoration (2026-11-04, local time)
+
+The popup now copies `main`'s original header, local logo, icons, version badge, conversation indicator, grouped option rows, custom switches, output button, tip, footer, and visual values. Markdown, dark mode, persistent progress, background-job controls, warnings, and Open/Dismiss remain available. The original history/date/incremental controls replace the redesigned range selector while keeping the same settings object and message protocol. Notifications reuse main's logo/spinner/card styling, with the current dark-theme binding and cancellation/dismissal handlers retained. The popup keeps its 360-pixel intrinsic width and scrolls vertically so additional feature controls remain reachable. Newly displayed progress and saved-result cards scroll into view without moving the controls on subsequent progress updates.
+
+`tests/e2e/references/main-popup.html` is a frozen copy of the main-branch popup used as the visual reference. All 267 Node tests and 40 Chromium browser cases pass. The browser comparison samples 22 original elements for font, color, gradient, spacing, border, radius, and shadow parity. The UI suite also checks theme persistence, original switch interactions, full/loaded/date/incremental settings, result opening/dismissal, warnings, and the tiny-host popup sizing regression. The mechanical design scan flags inherited main-branch choices such as muted helper text, small type, and original transitions; those pinned design values are preserved for the requested exact restoration.
+
+Changes to production code are limited to HTML/CSS, popup control/display wiring, progress renderer styling/markup, and notification positioning. A SHA-256 check of 38 protected browser sources and the content-script code outside those presentation boundaries reports no changes. The notification cancellation/dismissal callback is byte-for-byte unchanged. No collector, background worker, checkpoint, media/download, packaging, permission, theme-service, or result-action code changed.
+
 ## Toolbar popup sizing regression (2026-11-04, local time)
 
 The installed Vivaldi toolbar could create an almost invisible 28 × 102 pixel popup even though opening `popup.html` in a normal tab rendered correctly. Accessibility inspection identified the narrow extension web view. The popup body's `max-width: 100vw` constrained its intrinsic width to that initial guest viewport, preventing the host from sizing it to the intended 360 pixels. Removing that viewport-relative cap in both browser stylesheets preserves the fixed popup width.
