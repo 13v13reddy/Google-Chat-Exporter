@@ -1,6 +1,16 @@
 'use strict';
 const { test, expect } = require('./fixture');
 
+test('popup retains its intrinsic width when the toolbar host starts at a tiny viewport', async ({ app }) => {
+  await app.openSource();
+  const popup = await app.popup();
+  // Vivaldi starts the toolbar guest at 28px and sizes it from its content.
+  // Viewport-relative width caps create a feedback loop at that initial size.
+  await popup.setViewportSize({ width: 28, height: 102 });
+  await expect.poll(async () => (await popup.locator('body').boundingBox()).width).toBe(360);
+  expect(await popup.locator('#format-select').evaluate(element => element.getBoundingClientRect().width)).toBeGreaterThan(100);
+});
+
 test('original popup layout keeps named settings, dark mode, and saved results usable', async ({ app }, info) => {
   await app.openSource();
   const longName = 'A long conversation name with café 日本語 and a verylongunbrokensuffix'.repeat(2);

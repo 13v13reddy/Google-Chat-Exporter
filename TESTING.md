@@ -26,6 +26,12 @@ Theme tests cover system defaults, saved light/dark choices, updates across popu
 
 These tests mock `chrome.*` APIs. They do not prove that an installed extension has the required permissions, selects the right iframe, remains active through browser worker suspension, or successfully fetches authenticated Google attachments.
 
+## Toolbar popup sizing regression (2026-11-04, local time)
+
+The installed Vivaldi toolbar could create an almost invisible 28 × 102 pixel popup even though opening `popup.html` in a normal tab rendered correctly. Accessibility inspection identified the narrow extension web view. The popup body's `max-width: 100vw` constrained its intrinsic width to that initial guest viewport, preventing the host from sizing it to the intended 360 pixels. Removing that viewport-relative cap in both browser stylesheets preserves the fixed popup width.
+
+A new browser regression starts the popup at the observed 28 × 102 viewport and checks that the body retains its 360-pixel intrinsic width and usable form controls. It failed at 28 pixels before the fix and passes afterward. All four popup UI cases pass, including light/dark settings, saved results, input validation, and progress-notification theme changes. This test exercises the sizing feedback condition; Playwright still opens the extension page as a tab rather than pressing Vivaldi's native toolbar button. The installed extension was reloaded after checking that no export was active.
+
 ## Network collection verification (2026-11-04, local time)
 
 The background collector replaces rendering-dependent traversal for supported space routes started from the toolbar or context menu. `chat-api.js` contains the positional web-protocol fields and strict response validation. `background-collector.js` manages an inactive, task-owned Chat tab, bounded read requests, retries, filtering, attachment downloads, and packaging. Credentials are read inside Chat's MAIN world and are never returned or stored. No additional browser permissions or dependencies were added.
