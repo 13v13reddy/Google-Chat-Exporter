@@ -1,6 +1,6 @@
 // ============================================================
 // Google Chat Exporter v2.0 — background.js (Service Worker)
-// 100% private: no external requests, no telemetry, no tracking
+// No export server, telemetry, or tracking
 // ============================================================
 
 if (typeof importScripts === 'function' && typeof JSZip === 'undefined') {
@@ -8,6 +8,9 @@ if (typeof importScripts === 'function' && typeof JSZip === 'undefined') {
 }
 if (typeof importScripts === 'function' && typeof ExportJobs === 'undefined') {
   importScripts('export-jobs.js');
+}
+if (typeof importScripts === 'function' && typeof BackgroundCollector === 'undefined') {
+  importScripts('chat-api.js', 'background-collector.js');
 }
 const mediaRequests = new Map();
 const CHAT_URL_PATTERNS = ['https://chat.google.com/*', 'https://mail.google.com/*',
@@ -261,16 +264,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
         }
         await ExportJobs.beginPackaging(msg.jobId, sender);
-        const result = msg.format === 'html'
-          ? await packageHtml(msg.payload)
-          : msg.format === 'md'
-            ? await packageMarkdown(msg.payload)
-            : await packageTxt(msg.payload);
-        let checkpointWarning = '';
-        if (msg.payload.checkpoint) {
-          try { await queueCheckpoint(result.downloadId, msg.payload.checkpoint); }
-          catch { checkpointWarning = 'Export downloaded, but its checkpoint could not be saved. Next export may repeat messages.'; }
-        }
+        const result = await packageExportPayload(msg.format, msg.payload);
+        const checkpointWarning = result.checkpointWarning;
         await ExportJobs.downloaded(msg.jobId, sender, result,
           [msg.payload.history?.warning, checkpointWarning].filter(Boolean).join(' '));
         sendResponse({ success: true, ...result, checkpointWarning });
@@ -319,6 +314,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Recover status after a service-worker/browser restart, including native saves.
 ExportJobs.recover().catch(console.error);
 
+async function packageExportPayload(format, payload) {
+  const result = format === 'html' ? await packageHtml(payload) : format === 'md' ? await packageMarkdown(payload) : await packageTxt(payload);
+  let checkpointWarning = '';
+  if (payload.checkpoint) {
+    try { await queueCheckpoint(result.downloadId, payload.checkpoint); }
+    catch { checkpointWarning = 'Export downloaded, but its checkpoint could not be saved. Next export may repeat messages.'; }
+  }
+  return { ...result, checkpointWarning };
+}
+
 // ── Core Export Trigger (PWA-safe) ─────────────────────────
 
 /**
@@ -340,6 +345,14 @@ async function triggerExport(contextMenuTab, format, overrides = {}, requestedJo
   const settings = { ...await getSettings(), ...overrides };
   settings.sourceUrl = (await chrome.tabs.get(targetTabId)).url;
   const jobId = /^job-[a-zA-Z0-9-]{1,96}$/.test(requestedJobId) ? requestedJobId : `job-${crypto.randomUUID()}`;
+  if ((settings.loadAll !== false || settings.incremental) && typeof BackgroundCollector !== 'undefined' &&
+      typeof chrome.tabs.create === 'function' && ChatAPI.address(frame.conversationUrl || settings.sourceUrl)?.supported) {
+    if (collectionStarts.has(jobId)) return collectionStarts.get(jobId);
+    const pending = BackgroundCollector.start(targetTabId, frame, format, settings, jobId, packageExportPayload);
+    collectionStarts.set(jobId, pending);
+    try { return await pending; }
+    finally { collectionStarts.delete(jobId); }
+  }
   if ((settings.loadAll !== false || settings.incremental) && typeof chrome.windows?.create === 'function') {
     if (collectionStarts.has(jobId)) return collectionStarts.get(jobId);
     const pending = startCollectionWindow(targetTabId, frame, format, settings, jobId);

@@ -6,10 +6,14 @@ const ExportJobs = (() => {
   const WINDOWS_KEY = 'gceCollectionWindows';
   let collectionWindows = {};
   const owned = new Set();
+  // Abort callbacks also identify live network work in this worker only.
+  // Persisted network jobs without an entry are interrupted after a restart.
+  const backgroundCollectors = new Map();
   let keepingAwake = false;
   let queue = Promise.resolve();
   const active = job => job.state === 'working' || job.state === 'paused';
-  const needsPage = job => active(job) && !['packaging', 'download'].includes(job.phase);
+  const cancellable = job => active(job) && !['packaging', 'download'].includes(job.phase);
+  const needsPage = job => job.collector !== 'network' && cancellable(job);
   const validId = id => typeof id === 'string' && /^job-[a-zA-Z0-9-]{1,96}$/.test(id);
   const sameOwner = (job, sender) => job && job.tabId === sender.tab?.id && job.frameId === (sender.frameId || 0);
 
@@ -40,7 +44,9 @@ const ExportJobs = (() => {
     const window = windows[job.jobId];
     // Session ownership prevents a retained job from closing a reused tab ID
     // after a browser restart. Close the helper tab, never an entire window.
-    if (!window || window.tabId !== job.tabId || window.windowId !== job.collectionWindowId) return;
+    const tabId = job.collector === 'network' ? job.backgroundTabId : job.tabId;
+    const windowId = job.collector === 'network' ? job.backgroundWindowId : job.collectionWindowId;
+    if (!window || window.tabId !== tabId || window.windowId !== windowId) return;
     const tab = await chrome.tabs.get(window.tabId).catch(() => null);
     if (tab?.windowId === window.windowId) await chrome.tabs.remove(window.tabId);
     if (window.layout) {
@@ -91,7 +97,8 @@ const ExportJobs = (() => {
         chrome.tabs.sendMessage(changed.sourceTabId, { action: 'exportJobUpdate', job: changed },
           { frameId: changed.sourceFrameId }).catch(() => {});
       }
-      if (changed.collectionWindowId !== undefined && (!active(changed) || ['packaging', 'download'].includes(changed.phase))) {
+      if ((changed.collectionWindowId !== undefined || changed.backgroundTabId !== undefined) &&
+          (!active(changed) || ['packaging', 'download'].includes(changed.phase))) {
         await closeCollection(changed).catch(error => console.warn('[GCE] Could not close export window:', error));
       }
     }
@@ -106,7 +113,7 @@ const ExportJobs = (() => {
     return serial(async () => {
       const jobs = await read();
       if (jobs[jobId]) throw new Error('This export request was already started.');
-      if (Object.values(jobs).some(job => active(job) && job.collectionWindowId !== undefined &&
+      if (Object.values(jobs).some(job => active(job) && (job.collectionWindowId !== undefined || job.collector === 'network') &&
         Number.isInteger(details.sourceWindowId) && job.sourceWindowId === details.sourceWindowId)) {
         throw new Error('An export is already running in this window. Finish or cancel it first.');
       }
@@ -161,11 +168,121 @@ const ExportJobs = (() => {
     });
   }
 
+  function createBackground(jobId, details, abortCallback) {
+    if (!validId(jobId) || !Number.isInteger(details?.sourceTabId) ||
+        (details.sourceFrameId !== undefined && !Number.isInteger(details.sourceFrameId)) ||
+        typeof abortCallback !== 'function') return Promise.reject(new Error('Invalid background export request.'));
+    return serial(async () => {
+      const jobs = await read();
+      if (jobs[jobId]) throw new Error('This export request was already started.');
+      if (Object.values(jobs).some(job => active(job) && (job.collector === 'network' || job.collectionWindowId !== undefined) &&
+        Number.isInteger(details.sourceWindowId) && job.sourceWindowId === details.sourceWindowId)) {
+        throw new Error('An export is already running in this window. Finish or cancel it first.');
+      }
+      const frameId = details.sourceFrameId || 0;
+      jobs[jobId] = revise({ jobId, collector: 'network', sourceTabId: details.sourceTabId,
+        sourceFrameId: frameId, sourceWindowId: details.sourceWindowId,
+        tabId: details.sourceTabId, frameId, conversationName: details.conversationName || 'Google Chat', startedAt: Date.now() }, {
+        state: 'working', phase: 'history', text: 'Loading messages…', percent: 2
+      });
+      backgroundCollectors.set(jobId, abortCallback);
+      try { await save(jobs, jobs[jobId]); }
+      catch (error) { backgroundCollectors.delete(jobId); throw error; }
+      return { success: true, jobId };
+    });
+  }
+
+  function backgroundProgress(jobId, update) {
+    return serial(async () => {
+      const jobs = await read();
+      const job = jobs[jobId];
+      if (job?.collector !== 'network' || !backgroundCollectors.has(jobId) || !cancellable(job)) return { success: false };
+      if (['packaging', 'download', 'complete', 'failed', 'cancelled', 'interrupted'].includes(update.phase)) {
+        throw new Error('Use the background export lifecycle methods to finish collection.');
+      }
+      jobs[jobId] = revise(job, { state: 'working', phase: String(update.phase || job.phase),
+        text: String(update.text || ''), percent: Math.max(0, Math.min(100, Number(update.percent) || 0)) });
+      await save(jobs, jobs[jobId]);
+      return { success: true };
+    });
+  }
+
+  function attachBackgroundTab(jobId, tab) {
+    return serial(async () => {
+      const jobs = await read();
+      const job = jobs[jobId];
+      if (job?.collector !== 'network' || !backgroundCollectors.has(jobId) || !cancellable(job)) {
+        throw new Error('Export is no longer active. Please retry.');
+      }
+      const windows = await readWindows();
+      windows[jobId] = { tabId: tab.id, windowId: tab.windowId };
+      await saveWindows(windows);
+      jobs[jobId] = revise(job, { backgroundTabId: tab.id, backgroundWindowId: tab.windowId,
+        phase: 'opening', text: 'Connecting to Chat…' });
+      await save(jobs, jobs[jobId]);
+    });
+  }
+
+  function backgroundEmpty(jobId) {
+    return serial(async () => {
+      const jobs = await read();
+      const job = jobs[jobId];
+      if (job?.collector !== 'network' || !backgroundCollectors.delete(jobId) || !cancellable(job)) return;
+      jobs[jobId] = revise(job, { state: 'done', phase: 'empty', percent: 100,
+        text: 'No new messages found.' });
+      await save(jobs, jobs[jobId]);
+    });
+  }
+
+  function beginBackgroundPackaging(jobId) {
+    return serial(async () => {
+      const jobs = await read();
+      const job = jobs[jobId];
+      if (job?.collector !== 'network' || !backgroundCollectors.has(jobId) || !cancellable(job)) {
+        throw new Error('Export is no longer active. Please retry.');
+      }
+      jobs[jobId] = revise(job, { phase: 'packaging', state: 'working', text: 'Packaging export...', percent: 88 });
+      await save(jobs, jobs[jobId]);
+    });
+  }
+
+  function backgroundDownloaded(jobId, download) {
+    return serial(async () => {
+      const jobs = await read();
+      const job = jobs[jobId];
+      if (job?.collector !== 'network' || !backgroundCollectors.has(jobId) || !active(job) || job.phase !== 'packaging') {
+        throw new Error('Export is no longer active. Please retry.');
+      }
+      if (!Number.isSafeInteger(download.downloadId) || download.downloadId < 0) throw new Error('Invalid export download.');
+      jobs[jobId] = revise(job, { state: 'working', phase: 'download', percent: 95,
+        text: 'Saving export...', downloadId: download.downloadId, filename: download.filename, warning: download.warning || '' });
+      try {
+        await save(jobs, jobs[jobId]);
+        await reconcile(jobs, jobs[jobId]);
+      } finally { backgroundCollectors.delete(jobId); }
+    });
+  }
+
+  function backgroundFailed(jobId, error) {
+    return serial(async () => {
+      const jobs = await read();
+      const job = jobs[jobId];
+      const running = backgroundCollectors.delete(jobId);
+      if (job?.collector !== 'network' || !running || !active(job)) return { success: false };
+      const interrupted = error?.name === 'ChatContextLost';
+      jobs[jobId] = revise(job, { state: 'error', phase: interrupted ? 'interrupted' : 'failed',
+        text: interrupted ? error.message : `Export failed: ${error?.message || error}`, percent: 0 });
+      await save(jobs, jobs[jobId]);
+      return { success: true };
+    });
+  }
+
   function progress(msg, sender) {
     if (!validId(msg.jobId) || !Number.isInteger(sender.tab?.id)) return Promise.resolve({ success: false });
     return serial(async () => {
       const jobs = await read();
       const old = jobs[msg.jobId];
+      if (old?.collector === 'network') return { success: false };
       const finalReport = old?.phase === 'interrupted' && !Number.isSafeInteger(old.downloadId) && ['done', 'error'].includes(msg.state);
       if (old && (!sameOwner(old, sender) || (!active(old) && !finalReport))) return { success: false };
       // Once handed to the background, only native download events decide success.
@@ -188,7 +305,7 @@ const ExportJobs = (() => {
     return serial(async () => {
       const jobs = await read();
       const job = jobs[jobId];
-      if (!sameOwner(job, sender) || !active(job)) { owned.delete(jobId); throw new Error('Export is no longer active. Please retry.'); }
+      if (job?.collector === 'network' || !sameOwner(job, sender) || !active(job)) { owned.delete(jobId); throw new Error('Export is no longer active. Please retry.'); }
       jobs[jobId] = revise(job, { phase: 'packaging', state: 'working', text: 'Packaging export...', percent: 88 });
       await save(jobs, jobs[jobId]);
     });
@@ -212,7 +329,7 @@ const ExportJobs = (() => {
     return serial(async () => {
       const jobs = await read();
       const job = jobs[jobId];
-      if (!sameOwner(job, sender)) return;
+      if (job?.collector === 'network' || !sameOwner(job, sender)) return;
       jobs[jobId] = revise(job, { state: 'working', phase: 'download', percent: 95,
         text: 'Saving export...', downloadId: result.downloadId, filename: result.filename, warning });
       await save(jobs, jobs[jobId]);
@@ -227,7 +344,7 @@ const ExportJobs = (() => {
     return serial(async () => {
       const jobs = await read();
       const job = jobs[jobId];
-      if (!sameOwner(job, sender) || !active(job)) return;
+      if (job?.collector === 'network' || !sameOwner(job, sender) || !active(job)) return;
       jobs[jobId] = revise(job, { state: 'error', phase: 'failed', text: `Export failed: ${error}`, percent: 0 });
       await save(jobs, jobs[jobId]);
     });
@@ -237,6 +354,16 @@ const ExportJobs = (() => {
     return serial(async () => {
       const jobs = await read();
       for (const job of Object.values(jobs)) {
+        if (job.collector === 'network') {
+          if (job.backgroundTabId !== tabId || !cancellable(job) || (loading && job.phase === 'opening')) continue;
+          const abort = backgroundCollectors.get(job.jobId);
+          backgroundCollectors.delete(job.jobId);
+          jobs[job.jobId] = revise(job, { state: 'error', phase: 'interrupted',
+            text: 'Export interrupted: its background Chat tab was closed, reloaded, or discarded. Please retry.' });
+          await save(jobs, jobs[job.jobId]);
+          abort?.();
+          continue;
+        }
         if (job.tabId !== tabId || !needsPage(job) || (loading && job.phase === 'opening')) continue;
         jobs[job.jobId] = revise(job, { state: 'error', phase: 'interrupted',
           text: 'Export interrupted: the Chat tab was closed, reloaded, or discarded. Please retry.' });
@@ -264,7 +391,15 @@ const ExportJobs = (() => {
           await reconcile(jobs, job);
           continue;
         }
-        if (!active(job) || owned.has(job.jobId)) continue;
+        if (!active(job)) continue;
+        if (job.collector === 'network') {
+          if (backgroundCollectors.has(job.jobId)) continue;
+          jobs[job.jobId] = revise(job, { state: 'error', phase: 'interrupted',
+            text: 'Export interrupted: its background export ended. Please retry.' });
+          await save(jobs, jobs[job.jobId]);
+          continue;
+        }
+        if (owned.has(job.jobId)) continue;
         try {
           const tab = await chrome.tabs.get(job.tabId);
           if (!tab || tab.discarded || ['opening', 'packaging'].includes(job.phase)) throw new Error('Context lost');
@@ -308,7 +443,18 @@ const ExportJobs = (() => {
         if (job.collectionWindowId !== undefined) update.state = 'normal';
         if (tab.windowId !== undefined) await chrome.windows?.update(tab.windowId, update);
       } else {
-        if (!needsPage(job)) return { success: false, error: 'This export has already been handed off for saving.' };
+        if (!cancellable(job)) return { success: false, error: 'This export has already been handed off for saving.' };
+        if (job.collector === 'network') {
+          const abort = backgroundCollectors.get(job.jobId);
+          backgroundCollectors.delete(job.jobId);
+          jobs[job.jobId] = revise(job, { state: 'error', phase: 'cancelled', text: 'Export cancelled.', percent: 0 });
+          try { await save(jobs, jobs[job.jobId]); }
+          finally {
+            try { Promise.resolve(abort?.()).catch(error => console.warn('[GCE] Could not abort collection:', error)); }
+            catch (error) { console.warn('[GCE] Could not abort collection:', error); }
+          }
+          return { success: true };
+        }
         if (job.phase === 'opening') {
           owned.delete(job.jobId);
           jobs[job.jobId] = revise(job, { state: 'error', phase: 'cancelled', text: 'Export cancelled.', percent: 0 });
@@ -336,6 +482,7 @@ const ExportJobs = (() => {
 
   return { handleMessage, beginPackaging, downloaded, failed, recover, updateBadge,
     createCollection, arrangeCollection, prepareCollection, collectionPending, failCollection, isCollectionTab,
+    createBackground, attachBackgroundTab, backgroundEmpty, backgroundProgress, beginBackgroundPackaging, backgroundDownloaded, backgroundFailed,
     async getJob(jobId) { return (await read())[jobId]; },
     collectionStarted(jobId) { owned.delete(jobId); } };
 })();

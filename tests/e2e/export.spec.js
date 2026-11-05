@@ -168,7 +168,7 @@ test('date filtering retains the older parent context for recent replies', async
 });
 
 test('Gmail exports target its Chat frame and retain its account in the collector', async ({ app }) => {
-  await app.source.goto('https://mail.google.com/mail/u/1/#chat/space/ROOM');
+  await app.source.goto('https://mail.google.com/mail/u/1/#chat/dm/ROOM');
   await app.source.frameLocator('iframe').locator('.nF6pT').first().waitFor();
   const popup = await app.popup();
   await expect(popup.locator('#conv-name')).toHaveText('Fixture space');
@@ -240,7 +240,7 @@ test('minimizing the collector preserves a complete export across browser render
 });
 
 test('a thread deep link exports the conversation root and cleans up its helper', async ({ app }) => {
-  await app.source.goto('https://chat.google.com/u/1/room/ROOM/thread/parent-6');
+  await app.source.goto('https://chat.google.com/u/1/dm/ROOM/thread/parent-6');
   await app.source.waitForFunction(() => window.fixture?.ready);
   const popup = await app.popup();
   await popup.locator('#format-select').selectOption('md');

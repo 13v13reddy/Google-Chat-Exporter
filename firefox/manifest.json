@@ -47,7 +47,7 @@
     "https://*.googleapis.com.mcas.ms/*"
   ],
   "background": {
-    "scripts": ["lib/jszip.min.js", "export-jobs.js", "background.js"]
+    "scripts": ["lib/jszip.min.js", "export-jobs.js", "chat-api.js", "background-collector.js", "background.js"]
   },
   "content_scripts": [
     {

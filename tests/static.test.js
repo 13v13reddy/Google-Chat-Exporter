@@ -59,7 +59,7 @@ test('2.2 supports Firefox Add-on with Gecko settings and background scripts', (
   assert.ok(manifest.browser_specific_settings?.gecko?.strict_min_version);
   assert.ok(manifest.browser_specific_settings?.gecko_android?.strict_min_version);
   assert.deepEqual(manifest.browser_specific_settings?.gecko?.data_collection_permissions, { required: ['none'] });
-  assert.deepEqual(manifest.background.scripts, ['lib/jszip.min.js', 'export-jobs.js', 'background.js']);
+  assert.deepEqual(manifest.background.scripts, ['lib/jszip.min.js', 'export-jobs.js', 'chat-api.js', 'background-collector.js', 'background.js']);
   assert.ok(manifest.host_permissions.includes('https://mail.google.com/*'));
   assert.ok(manifest.content_scripts.some(script =>
     script.matches.includes('https://mail.google.com/*')
