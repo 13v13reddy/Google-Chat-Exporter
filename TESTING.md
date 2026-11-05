@@ -4,6 +4,14 @@
 
 Run `npm test` and `npm run build` before committing export changes.
 
+### Browser end-to-end tests
+
+Run `npm ci`, `npx playwright install chromium`, and `npm run test:e2e`. Set `GCE_HEADED=1` to show the test browser. Each test gets an isolated profile, the unpacked Chrome extension, synthetic pages at the supported Google Chat/Gmail URLs, and its own download directory. The tests neither sign in nor use work-chat content. The JSON report, retained failure traces, browser errors, job metadata, and light/dark UI captures are written under `test-results/` and are excluded from packages and Git.
+
+These tests run the actual popup → background → selected Chat frame → extraction → packaging → native download path. They reopen TXT/Markdown files and HTML ZIPs, compare message IDs, validate attachment bytes and UTF-8, and exercise date filters, old-parent/new-reply context, incremental saves, incomplete threads, failed attachments, blocked downloads and retries, cancellation, collector reload/closure, worker restart, source navigation, popup reopening, Gmail account/frame selection, thread deep links, unavailable files, and auto-export. UI cases cover saved settings, long conversation names, empty dates, unavailable Chat, visible controls, dark-mode propagation, dismissing results without deleting files, and uncaught page errors.
+
+Playwright enables Chromium focus emulation by default. The minimized-window case disables it on the collector and requires either a resumable pause or a file containing the exact expected message IDs, because automated browsers can keep minimized pages rendering. These synthetic pages and DevTools-controlled rendering policies cannot establish how an installed Vivaldi session handles occlusion or display sleep. Live rendering checks remain separate. Firefox's shared code is covered by the Node suite; these browser tests run Chromium, not an installed Firefox add-on. Native operating-system file opening and authenticated attachments also require manual checks.
+
 The Node test suite loads both browser sources with synthetic DOM and browser APIs. It covers history traversal, overlapping viewports, collapsed replies, deletion placeholders, parent/reply relationships, date filters, incremental baselines and context, cancellation, incomplete scans, and conversation changes behind fixed PWA addresses.
 
 Packaging tests load the shipped JSZip library, generate and reopen real archives, and verify HTML, CSS, attachment bytes, UTF-8 text, and thread metadata. TXT and Markdown downloads are also decoded. Firefox's blob-URL download path is exercised with Node's Blob implementation. A synthetic 10,000-message Markdown export checks that message IDs and Unicode text survive packaging.
@@ -17,6 +25,18 @@ Collection-window fixtures verify that full-history toolbar/context-menu request
 Theme tests cover system defaults, saved light/dark choices, updates across popup/notification/result contexts, stale preference reads, failed storage writes, and notification listener cleanup. Progress-notification tests run the actual content UI renderer against a synthetic DOM. Thread diagnostic tests retain incomplete-export checkpoint safeguards and verify that TXT, Markdown, and HTML include failure reasons and reply coverage, with safe text escaping.
 
 These tests mock `chrome.*` APIs. They do not prove that an installed extension has the required permissions, selects the right iframe, remains active through browser worker suspension, or successfully fetches authenticated Google attachments.
+
+## Final verification (2026-11-04, local time)
+
+All 233 Node tests pass for the shared Chrome/Firefox sources. The 23-case Chromium browser suite passes, and an additional browser case verifies that loaded-only export includes already-open replies without expanding collapsed content. Both extension packages build and pass ZIP integrity checks. Light/dark popup and saved-result captures were visually inspected, including long conversation names, keyboard focus, warnings, and text-only controls. A browser test exposed the old 119-character conversation-name limit; dedicated title selectors now retain the full name, with visual truncation and a full-name tooltip in the popup.
+
+In the installed Vivaldi work profile, a task-owned full-history run collected 4,655 messages and visited 629 threads before explicit cancellation. It was a cancellation and rendering check, not a completed full-space archive. Cancellation retained its terminal outcome, closed the companion, and created no partial download. Bringing the companion forward resumed the same job after painting stopped.
+
+The authorized debugger experiment attached only to a task-owned companion. After focus emulation settled, `document.hasFocus()` reported true and `document.hidden` false, but a three-second measurement observed zero animation callbacks and collection remained paused. Foregrounding that window resumed history collection. The experiment was cancelled, the debugger detached, and the extension reloaded without the debugger permission. A fresh installed-page check confirmed that `chrome.debugger` was unavailable and the permission absent. All temporary diagnostic scripts and task-owned tabs were removed. No Chat messages were sent, edited, or deleted.
+
+A separate installed-browser Markdown export of loaded messages completed its native download. All 26 unique message IDs matched the rendered main timeline and already-open thread in both directions, with no duplicates. Its warning correctly states that only rendered messages were requested. This verifies an installed native save; it does not certify full-history completeness, authenticated attachments, native file opening, or installed Firefox behavior. The test archive remains a loaded-only sample, not a complete space export.
+
+Chromium now requests display wakefulness only during active collection and releases it on pause, cancellation, failure, or packaging. Lifecycle tests cover multiple concurrent jobs and the packaging handoff. This prevents ordinary display sleep during collection; it does not bypass Vivaldi's unfocused-window rendering policy or a locked desktop. Uninterrupted full-history collection while this Vivaldi session is unfocused remains unresolved.
 
 ## Tab-switch investigation (2026-11-04)
 

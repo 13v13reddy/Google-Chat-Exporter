@@ -36,7 +36,7 @@ Works across **Google Chrome, Mozilla Firefox, Brave, Microsoft Edge**, standalo
   - **Popup UI**: Modern toolbar popup with live conversation detection, format selection, and progress monitoring.
   - **Context Menu**: Right-click anywhere inside a conversation to export as TXT, Markdown, or HTML with media.
 - **Live Animated HUD**: Real-time progress indicator showing message count, scroll progress, and media download status.
-- **Open After Export**: A persistent result card appears in Chat and in the popup after packaging. **Open** becomes available when the download completes and opens that file with its associated application. Use **×** to dismiss the card without removing the file. HTML exports open as ZIP archives.
+- **Open After Export**: A persistent result card appears in Chat and in the popup after packaging. **Open** becomes available when the download completes and opens that file with its associated application. Use **Dismiss** to dismiss the card without removing the file. HTML exports open as ZIP archives.
 - **100% Private & Client-Side**: All parsing and ZIP generation happen inside your browser. No external servers, no tracking, zero telemetry.
 
 ---
@@ -78,7 +78,8 @@ Install directly from your browser's official store:
 Chrome and Firefox share source files and assets; only their manifests differ. Keep shared files identical in both folders. `npm run check:sources` checks this, and every package build runs the same check before creating archives. Popup and saved-result styles live in `ui.css`.
 
 - **Run Tests:** `npm test`
-- **Coverage and Manual Checks:** [Testing guide](TESTING.md). Automated tests use synthetic DOM/browser APIs; passing them does not replace installed-extension checks on each supported browser and layout.
+- **Run Browser Tests:** `npm ci`, `npx playwright install chromium`, then `npm run test:e2e`.
+- **Coverage and Manual Checks:** [Testing guide](TESTING.md). Unit tests use synthetic DOM/browser APIs; browser tests load the real extension against synthetic Chat pages and native downloads. Installed-browser checks still matter for rendering policies, authentication, and each supported browser.
 - **Run Benchmarks:** `npm run benchmark`
 - **Build Extension Packages:**
   - `npm run build` (builds both Chrome and Firefox ZIP archives in `dist/`)
@@ -90,18 +91,20 @@ Chrome and Firefox share source files and assets; only their manifests differ. K
 1. Navigate to [Google Chat](https://chat.google.com) or Gmail Chat.
 2. Click into any direct message or space.
 3. Choose either method:
-   - **Toolbar Popup**: Click the extension icon in your browser toolbar, select **Plain Text**, **Markdown (.md)**, or **HTML + Media**, and click **Export Current Conversation**.
-   - **Right-Click**: Right-click anywhere within the chat message area and select **"📄 Export Chat as TXT"**, **"📝 Export Chat as Markdown"**, or **"🌐 Export Chat as HTML (with media)"**.
-4. The animated status HUD will appear in the bottom-right corner as it scrolls history, extracts messages, and bundles media.
+   - **Toolbar Popup**: Click the extension icon in your browser toolbar, select **Text (.txt)**, **Markdown (.md)**, or **HTML**, and click **Export**.
+   - **Right-Click**: Right-click anywhere within the chat message area and select **Export Chat as TXT**, **Export Chat as Markdown**, or **Export Chat as HTML (with media)**.
+4. Progress appears in the bottom-right corner as the extension scrolls history, extracts messages, and bundles media.
 5. Your export file (`.txt`, `.md`, or `.zip`) will download automatically to your Downloads folder.
 
 ### Switching tabs during an export
 
-Closing the toolbar popup does not cancel the export. Reopen the extension from any tab to see its latest status, show the export window, or cancel while messages or media are being collected. The toolbar badge shows `RUN`, `WAIT`, `SAVE`, `DONE`, or `ERR`. Results and errors remain until dismissed with ×; a saved file keeps its **Open** button.
+Closing the toolbar popup does not cancel the export. Reopen the extension from any tab to see its latest status, show the export window, or cancel while messages or media are being collected. The toolbar badge shows `RUN`, `WAIT`, `SAVE`, `DONE`, or `ERR`. Results and errors remain until you select **Dismiss**; a saved file keeps its **Open file** button.
 
 Full-history exports started from the toolbar or context menu open the selected conversation in a separate export window, isolating collection from tab or conversation changes in the original window. Collection can continue while that companion keeps rendering. On desktop screens at least 1000 pixels wide, it is placed beside the main browser; the browser is temporarily resized if needed. Its original bounds are restored after collection unless you change that layout yourself. Exit full screen before starting. Progress and the saved-file notification appear in the original Chat tab and the toolbar. The export window closes automatically when captured data reaches background packaging, or when collection is cancelled or fails. Success is reported only after the browser confirms the download completed.
 
 Leave the export window visible and unminimized until collection finishes. Google Chat must keep rendering history and replies; if the window becomes hidden, covered, or stops painting while the computer is locked, collection pauses safely. **Show export** brings that window back and resumes collection. A loading timer cannot certify the end of history while painting is stopped. Reloading, closing, discarding, or changing its conversation interrupts collection and leaves a persistent error. The duplicate is checked against the selected conversation before collection starts, preserving its account, proxy host, and Firefox container.
+
+Chromium keeps the display awake during active collection. The request is released when collection pauses, ends, is cancelled, or reaches packaging. It does not unlock the computer or bypass a browser's rendering restrictions.
 
 Some Vivaldi environments also stop painting unfocused windows even when they are visible. The companion window does not bypass that restriction: collection explicitly pauses until **Show export** restores rendering. Uninterrupted background collection is not verified in that environment.
 
@@ -114,9 +117,9 @@ Status metadata for up to 20 recent finished exports is kept locally, along with
 - **Messages → All messages and replies** loads history and the replies in each discovered thread.
 - **Since a date** reveals a date input and filters messages and replies after loading history. Older parents can have new replies, so their threads are still checked. A parent needed to explain an exported reply is labeled as context.
 - **New since last export** saves a per-conversation checkpoint and exports only newer messages on subsequent runs. The first run establishes a baseline; TXT, Markdown, HTML, and HTML-with-media modes use separate checkpoints.
-- **Loaded messages only** exports the rendered timeline without opening threads. **Loaded since a date** also filters that rendered timeline by date.
+- **Loaded messages only** exports the rendered timeline and any already-open replies without opening threads or expanding collapsed replies. **Loaded since a date** also filters those rendered messages by date.
 - **Download attachments** is available for HTML. Text and Markdown retain attachment links.
-- **Options** contains auto-export and dark mode. Dark mode applies to the popup and export notifications, remembers the choice locally, and follows the system appearance until a choice is saved.
+- **Dark mode** and **Auto-export on open** appear below the export settings. Dark mode applies to the popup and export notifications, remembers the choice locally, and follows the system appearance until a choice is saved.
 
 Each incremental run creates a new file. Keep earlier files to retain the complete archive. Checkpoints are local to the browser profile and advance only after Chrome reports a completed download.
 

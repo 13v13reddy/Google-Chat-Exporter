@@ -97,6 +97,7 @@ async function detectConversation() {
 function setConvStatus(ready, name) {
   conversationReady = ready;
   $('conv-name').textContent = name;
+  $('conv-name').title = name;
   $('connection-error').hidden = ready;
   if (!isExporting) resetBtn();
 }
@@ -180,7 +181,7 @@ function setExporting(label = 'Exporting') {
 
   const btn = $('export-btn');
   btn.disabled = true;
-  btn.innerHTML = `<span class="button-spinner" aria-hidden="true"></span><span>${label}</span>`;
+  btn.textContent = label + '…';
 }
 
 function resetBtn() {

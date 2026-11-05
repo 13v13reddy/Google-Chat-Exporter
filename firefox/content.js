@@ -169,24 +169,20 @@ function renderProgress(text, percent, state) {
       #gce-progress .gce-card { overflow: hidden; border: 1px solid var(--gce-line); border-radius: 8px; background: var(--gce-surface); }
       #gce-progress .gce-main { display: flex; align-items: center; gap: 12px; padding: 12px; }
       #gce-progress .gce-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-      #gce-progress .gce-close { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--gce-muted); font: inherit; cursor: pointer; }
+      #gce-progress .gce-close { min-height: 32px; flex: 0 0 auto; padding: 4px 8px; border: 1px solid var(--gce-line); border-radius: 5px; background: transparent; color: var(--gce-text); font: inherit; cursor: pointer; }
       #gce-progress .gce-close:hover { background: var(--gce-hover); color: var(--gce-text); }
       #gce-progress .gce-close:focus-visible { outline: 2px solid var(--gce-accent); outline-offset: 2px; }
-      #gce-progress .gce-close svg { width: 14px; height: 14px; }
       #gce-progress .gce-bar-wrap { height: 2px; background: var(--gce-line); }
-      #gce-progress .gce-bar { height: 100%; width: 0; background: var(--gce-accent); transition: width .2s ease; }
+      #gce-progress .gce-bar { height: 100%; width: 0; background: var(--gce-accent); }
       #gce-progress .gce-bar.done { background: var(--gce-success); }
       #gce-progress .gce-bar.error { background: var(--gce-error); }
-      @media (prefers-reduced-motion: reduce) { #gce-progress .gce-bar { transition: none; } }
     `;
 
     progressEl.innerHTML = `
       <section class="gce-card" aria-label="Chat export">
         <div class="gce-main">
           <span class="gce-label" role="status" aria-live="polite"></span>
-          <button class="gce-close" type="button" aria-label="Cancel export" title="Cancel export">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
-          </button>
+          <button class="gce-close" type="button" aria-label="Cancel export">Cancel</button>
         </div>
         <div class="gce-bar-wrap" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100"><div class="gce-bar"></div></div>
       </section>`;
@@ -231,6 +227,7 @@ function renderProgress(text, percent, state) {
     closeButton.hidden = mirroredExportJob?.phase === 'packaging' && mirroredExportJob.state === 'working';
     closeButton.title = closeLabel;
     closeButton.setAttribute('aria-label', closeLabel);
+    closeButton.textContent = canCancel ? 'Cancel' : 'Dismiss';
   }
 
 }
@@ -805,7 +802,7 @@ function getConversationName() {
     if (el) {
       const label = el.getAttribute('aria-label');
       const text = cleanText(label || el.textContent);
-      if (text && text.length > 0 && text.length < 120) return text;
+      if (text) return text;
     }
   }
   return '';

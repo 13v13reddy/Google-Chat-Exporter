@@ -6,6 +6,7 @@ const ExportJobs = (() => {
   const WINDOWS_KEY = 'gceCollectionWindows';
   let collectionWindows = {};
   const owned = new Set();
+  let keepingAwake = false;
   let queue = Promise.resolve();
   const active = job => job.state === 'working' || job.state === 'paused';
   const needsPage = job => active(job) && !['packaging', 'download'].includes(job.phase);
@@ -57,6 +58,14 @@ const ExportJobs = (() => {
 
   async function updateBadge(jobs) {
     jobs ||= await read();
+    if (chrome.power) {
+      try {
+        const collecting = Object.values(jobs).some(job => job.state === 'working' && needsPage(job));
+        if (collecting && !keepingAwake) chrome.power.requestKeepAwake('display');
+        if (!collecting) chrome.power.releaseKeepAwake();
+        keepingAwake = collecting;
+      } catch (error) { console.warn('[GCE] Could not keep collection awake:', error); }
+    }
     const all = Object.values(jobs).sort((a, b) => b.startedAt - a.startedAt);
     const job = all.find(active) || all.find(item => !item.acknowledged);
     const store = chrome.storage.session || chrome.storage.local;

@@ -81,21 +81,21 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: 'export_txt',
-      title: '📄 Export Chat as TXT',
+      title: 'Export Chat as TXT',
       contexts: ['all'],
       documentUrlPatterns: CHAT_URL_PATTERNS
     });
 
     chrome.contextMenus.create({
       id: 'export_md',
-      title: '📝 Export Chat as Markdown',
+      title: 'Export Chat as Markdown',
       contexts: ['all'],
       documentUrlPatterns: CHAT_URL_PATTERNS
     });
 
     chrome.contextMenus.create({
       id: 'export_html',
-      title: '🌐 Export Chat as HTML (with media)',
+      title: 'Export Chat as HTML (with media)',
       contexts: ['all'],
       documentUrlPatterns: CHAT_URL_PATTERNS
     });

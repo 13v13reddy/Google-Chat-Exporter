@@ -65,6 +65,26 @@ function loadBackground(target = 'chrome', withZip = false, initialStorage = {})
 }
 
 for (const target of ['chrome', 'firefox']) {
+  test(`${target}: collection holds the display awake only while at least one job is working`, async () => {
+    const c = loadBackground(target);
+    const ask = (message, sender = {}) => new Promise(resolve => c.chrome.runtime.onMessage.listener(message, sender, resolve));
+    await ask({ action: 'getExportJobs' });
+    const requests = [];
+    c.chrome.power = { requestKeepAwake(level) { requests.push(level); }, releaseKeepAwake() { requests.push('release'); } };
+    const progress = (jobId, state = 'working') => ask({ action: 'exportStateUpdate', jobId, state, phase: 'history', text: state, percent: 15 }, { tab: { id: jobId === 'job-one' ? 7 : 8 }, frameId: 0 });
+    await progress('job-one'); await progress('job-two');
+    assert.deepEqual(requests, ['display']);
+    await progress('job-one', 'paused');
+    assert.deepEqual(requests, ['display'], 'another collection still needs the display');
+    await progress('job-two', 'paused');
+    assert.equal(requests.at(-1), 'release');
+    await progress('job-two');
+    assert.equal(requests.at(-1), 'display');
+    c.owner = { tab: { id: 8 }, frameId: 0 };
+    await vm.runInContext('ExportJobs.beginPackaging("job-two", owner)', c);
+    assert.equal(requests.at(-1), 'release', 'packaging and paused jobs must not keep the display awake');
+  });
+
   test(`${target}: status recovery keeps a completed cancellation when its progress message is late`, async () => {
     const c = loadBackground(target);
     const ask = (message, sender = {}) => new Promise(resolve => c.chrome.runtime.onMessage.listener(message, sender, resolve));

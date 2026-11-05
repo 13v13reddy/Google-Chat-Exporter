@@ -7,26 +7,10 @@
   <link rel="stylesheet" href="ui.css">
 </head>
 <body class="popup-body">
-  <header class="app-header">Chat Exporter</header>
+  <header class="app-header"><h1>Google Chat Exporter</h1></header>
+  <div class="conversation-bar"><span id="conv-name">Google Chat</span></div>
   <main>
-    <h1 class="conversation" id="conv-name">Google Chat</h1>
     <p class="error" id="connection-error" role="alert" hidden></p>
-
-    <section class="status-area" id="status-area" role="status" aria-live="polite">
-      <div class="job-name" id="job-name" hidden></div>
-      <span id="status-text"></span>
-      <div class="progress-track" id="progress-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100">
-        <div class="progress-bar" id="progress-bar"></div>
-      </div>
-      <div class="job-controls" id="job-controls" hidden>
-        <button type="button" id="return-to-chat">Return to Chat</button>
-        <button type="button" id="cancel-export">Cancel</button>
-        <button class="icon-button" type="button" id="dismiss-status" aria-label="Dismiss export status" title="Dismiss">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
-        </button>
-      </div>
-    </section>
-    <div id="export-result" hidden></div>
 
     <div class="fields">
       <div class="field">
@@ -51,20 +35,33 @@
         <label for="date-from">From</label>
         <input type="date" id="date-from" disabled>
       </div>
+      <label class="check-row" id="media-row" hidden>
+        <span>Download attachments</span>
+        <input type="checkbox" id="include-media" checked disabled>
+      </label>
     </div>
-    <label class="check-row" id="media-row" hidden>
-      <input type="checkbox" id="include-media" checked disabled>
-      Download attachments
-    </label>
     <p class="error" id="settings-error" role="alert" hidden></p>
+
+    <div class="options">
+      <label class="check-row"><span>Dark mode</span><input type="checkbox" id="dark-mode"></label>
+      <label class="check-row"><span>Auto-export on open</span><input type="checkbox" id="export-mode"></label>
+    </div>
+    <p class="error" id="theme-error" role="alert" hidden></p>
     <button class="primary export-btn" id="export-btn" type="button" disabled>Export</button>
 
-    <details class="options">
-      <summary>Options</summary>
-      <label class="check-row"><input type="checkbox" id="export-mode">Auto-export on open</label>
-      <label class="check-row"><input type="checkbox" id="dark-mode">Dark mode</label>
-    </details>
-    <p class="error" id="theme-error" role="alert" hidden></p>
+    <section class="status-area" id="status-area" role="status" aria-live="polite">
+      <div class="job-name" id="job-name" hidden></div>
+      <span id="status-text"></span>
+      <div class="progress-track" id="progress-track" role="progressbar" aria-label="Export progress" aria-valuemin="0" aria-valuemax="100">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+      <div class="job-controls" id="job-controls" hidden>
+        <button type="button" id="return-to-chat">Return to Chat</button>
+        <button type="button" id="cancel-export">Cancel</button>
+        <button type="button" id="dismiss-status" aria-label="Dismiss export status">Dismiss</button>
+      </div>
+    </section>
+    <div id="export-result" hidden></div>
   </main>
   <script src="theme.js"></script>
   <script src="result-host.js"></script>

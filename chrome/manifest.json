@@ -18,7 +18,8 @@
     "scripting",
     "storage",
     "downloads",
-    "downloads.open"
+    "downloads.open",
+    "power"
   ],
   "host_permissions": [
     "https://chat.google.com/*",
