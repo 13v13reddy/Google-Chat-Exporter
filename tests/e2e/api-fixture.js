@@ -1,11 +1,13 @@
 'use strict';
 
 function createAPI(png) {
-  const state = { calls: [], delay: 0, mediaDelay: 0, mediaCalls: 0, failure: '', newMessage: false, media: false, mediaFail: false, throttled: false };
+  const state = { calls: [], delay: 0, mediaDelay: 0, mediaCalls: 0, failure: '', newMessage: false, media: false, mediaFail: false, throttled: false, dm: false, uncounted: false };
+  // DMs keep their ID in a later slot of Chat's positional conversation ID.
+  const ref = () => state.dm ? [null, null, ['ROOM']] : [['ROOM']];
   const epoch = Date.UTC(2026, 0, 1);
   const message = (id, parent, time, text, deleted = false) => {
     const row = Array(34).fill(null);
-    row[0] = [[null, null, null, [null, parent, [['ROOM']]]], id];
+    row[0] = [[null, null, null, [null, parent, ref()]], id];
     row[1] = deleted ? null : [['user'], 'Alice'];
     row[2] = String(time * 1000); row[9] = deleted ? null : text;
     if (deleted) row[7] = String((time + 1) * 1000);
@@ -14,11 +16,15 @@ function createAPI(png) {
   const topics = () => {
     const result = Array.from({ length: state.newMessage ? 9 : 8 }, (_, i) => {
       const id = i === 8 ? 'new-message' : `parent-${i}`, time = epoch + (i === 8 ? 10 : i) * 86400000;
-      const row = Array(15).fill(null); row[0] = [null, id, [['ROOM']]]; row[14] = String(time * 1000);
+      const row = Array(15).fill(null); row[0] = [null, id, ref()]; row[14] = String(time * 1000);
       const root = message(id, id, time, `Message ${i}: café 日本語 <script>literal</script>`);
       if (i === 7 && state.media) {
         const attachment = Array(10).fill(null); attachment[0] = 13;
         attachment[9] = ['synthetic-attachment', null, 'café.png', 'image/png']; root[10] = [attachment];
+      }
+      if (i === 3) {
+        const quoted = message('parent-2', 'parent-2', epoch + 2 * 86400000, 'Message 2: café 日本語 <script>literal</script>');
+        root[36] = [quoted[0], quoted[2], null, [String(epoch)], quoted[1], quoted[9]];
       }
       row[6] = [root];
       if (i === 0 || i === 6) row[6].push(message(`${id}-reply-1`, id, time + 1000, 'First reply'),
@@ -26,6 +32,7 @@ function createAPI(png) {
         message(`${id}-reply-2`, id, epoch + 9 * 86400000, 'A recent reply to an older parent'));
       row[1] = String(Math.max(...row[6].map(m => Number(m[2]))));
       row[10] = Array(13).fill(null); row[10][12] = [String(row[6].length - 1)];
+      if (state.uncounted) row[10] = null; // meeting chats omit reply counts
       return row;
     });
     return result.sort((a, b) => Number(b[14]) - Number(a[14]));
@@ -42,6 +49,8 @@ function createAPI(png) {
     if (state.delay) await new Promise(resolve => setTimeout(resolve, state.delay));
     if (state.failure === 'policy') return route.fulfill({ contentType: 'text/html', body: 'Policy page' });
     if (state.failure === 'auth') return route.fulfill({ status: 401, body: 'Sign in' });
+    const requested = operation === 'list_topics' ? body[7] : body[0]?.[3]?.[2];
+    if (state.failure === 'missing' || JSON.stringify(requested) !== JSON.stringify(ref())) return route.fulfill({ status: 404, body: 'Not found' });
     if (state.failure === 'throttle' && !state.throttled) { state.throttled = true; return route.fulfill({ status: 429, body: 'Retry' }); }
     let data;
     if (operation === 'list_topics') {

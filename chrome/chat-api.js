@@ -15,12 +15,23 @@ const ChatAPI = (() => {
       const account = url.pathname.match(/\/u\/(\d+)/)?.[1] || url.searchParams.get('authuser') || '0';
       if (!/^\d+$/.test(account)) return null;
       const origin = url.origin.replace('://mail.', '://chat.');
-      return { origin, account, kind: match[1], groupId: match[2],
+      return { origin, account, kind: match[1], groupId: match[2], ref: [[match[2]]],
         // Keep explicit DM routes on the tested DOM path until their history
         // response shape has also been verified against the web protocol.
         supported: match[1] !== 'dm',
         url: `${origin}/u/${account}/${match[1] === 'dm' ? 'dm' : 'room'}/${match[2]}` };
     } catch { return null; }
+  }
+
+  // A conversation ID is positional: [spaceId] for spaces and a later slot for
+  // DMs. /app/chat/<id> links do not say which, so list what to try, in order.
+  function variants(group) {
+    const base = `${group.origin}/u/${group.account}`;
+    const space = { ...group, ref: [[group.groupId]], url: `${base}/room/${group.groupId}` };
+    const dms = [[null, null, [group.groupId]], [null, [group.groupId]]]
+      .map(ref => ({ ...group, kind: 'dm', ref, url: `${base}/dm/${group.groupId}` }));
+    if (group.kind === 'dm') return dms;
+    return group.kind === 'chat' ? [space, ...dms] : [space];
   }
 
   function request() {
@@ -38,7 +49,7 @@ const ChatAPI = (() => {
     body[4] = [3, 1, 4];
     body[5] = 1000;
     body[6] = 100;
-    body[7] = [[group.groupId]];
+    body[7] = group.ref || [[group.groupId]];
     body[10] = 2;
     return body;
   }
@@ -46,7 +57,7 @@ const ChatAPI = (() => {
   function messagesRequest(group, threadId, before) {
     if (!id(threadId)) invalid('thread ID');
     const body = request();
-    body[0] = [null, null, null, [null, threadId, [[group.groupId]]]];
+    body[0] = [null, null, null, [null, threadId, group.ref || [[group.groupId]]]];
     body[1] = 100;
     body[3] = [null, null, micros(before) || invalid('reply cursor')];
     body[5] = [1];
@@ -55,7 +66,16 @@ const ChatAPI = (() => {
   }
 
   function groupMatches(value, group) {
-    return Array.isArray(value) && value[0]?.[0] === group.groupId;
+    const slot = (group.ref || [[group.groupId]]).findIndex(Array.isArray);
+    return Array.isArray(value) && value[slot]?.[0] === group.groupId;
+  }
+
+  // A probe answer proves a variant only if every returned topic belongs to
+  // exactly this conversation in the variant's ID slot.
+  function confirms(data, group) {
+    const row = data?.[0];
+    return Array.isArray(row) && row[0] === 'dfe.t.lt' && Array.isArray(row[1]) && row[1].length > 0 &&
+      row[1].every(topic => groupMatches(topic?.[0]?.[2], group));
   }
 
   function mediaFromAnnotations(annotations, group) {
@@ -107,6 +127,16 @@ const ChatAPI = (() => {
     return lines.join('\n\n');
   }
 
+  // A quote carries a snapshot of the quoted message: [id, created, _, _, creator, text, annotations].
+  function quotedMessage(value) {
+    if (value == null) return null;
+    if (!Array.isArray(value) || !Array.isArray(value[0]) || !id(value[0][1])) invalid('quoted message');
+    if (value[5] != null && typeof value[5] !== 'string') invalid('quoted message text');
+    const time = micros(value[1]);
+    return { messageId: value[0][1], sender: typeof value[4]?.[1] === 'string' ? value[4][1] : 'Unknown', text: value[5] || '',
+      ...(time ? { timestamp: new Date(Math.floor(time / 1000)).toISOString() } : {}) };
+  }
+
   function message(row, group, threadId) {
     if (!Array.isArray(row) || !id(row[0]?.[1])) invalid('message ID');
     const topic = row[0]?.[0]?.[3];
@@ -118,6 +148,7 @@ const ChatAPI = (() => {
     if (row[10] != null && !Array.isArray(row[10])) invalid('annotations');
     const deleted = !row[1] && !row[9] && !row[10] && !!micros(row[7]);
     const media = mediaFromAnnotations(row[10], group);
+    const quote = quotedMessage(row[36]);
     let text = deleted ? '[Message deleted]' : row[9] || '';
     if (row[14]) {
       const card = cardText(row[14]);
@@ -135,12 +166,12 @@ const ChatAPI = (() => {
     }
     // Keep unfamiliar bot/system payloads losslessly. Do not silently drop
     // their IDs or pretend their attachments were understood.
-    const rawContent = !text && !media.length;
+    const rawContent = !text && !media.length && !quote;
     if (rawContent) text = `[Structured Chat content]\n${JSON.stringify(row)}`;
     const absoluteTimestamp = Math.floor(time / 1000);
     const date = new Date(absoluteTimestamp).toISOString();
     return { messageId: row[0][1], threadId, ...(row[0][1] !== threadId ? { parentMessageId: threadId } : {}),
-      sender: row[1]?.[1] || 'Unknown', avatar: row[1]?.[2] || '', text, media, deleted, rawContent,
+      sender: row[1]?.[1] || 'Unknown', avatar: row[1]?.[2] || '', text, media, deleted, rawContent, ...(quote ? { quote } : {}),
       absoluteTimestamp, timestamp: date, date: date.slice(0, 10), _micros: String(time), _dedupKey: `${row[0][1]}/0` };
   }
 
@@ -157,9 +188,11 @@ const ChatAPI = (() => {
     const topics = row[1].map(topic => {
       if (!Array.isArray(topic) || !id(topic[0]?.[1]) || !groupMatches(topic[0]?.[2], group)) invalid('topic conversation');
       const count = topic[10]?.[12]?.[0];
-      if (!/^\d+$/.test(String(count)) || !Number.isSafeInteger(Number(count))) invalid('reply count');
+      // Some conversations (e.g. meeting chats) omit the count; their threads
+      // are then read back to the first message instead.
+      if (count != null && (!/^\d+$/.test(String(count)) || !Number.isSafeInteger(Number(count)))) invalid('reply count');
       if (!micros(topic[14]) || !Array.isArray(topic[6])) invalid('topic history cursor');
-      return { id: topic[0][1], created: String(topic[14]), latest: String(Math.max(micros(topic[1]), ...topic[6].map(row => micros(row[2]))) + 1), expectedReplies: Number(count),
+      return { id: topic[0][1], created: String(topic[14]), latest: String(Math.max(micros(topic[1]), ...topic[6].map(row => micros(row[2]))) + 1), expectedReplies: count == null ? null : Number(count),
         messages: topic[6].map(value => message(value, group, topic[0][1])) };
     });
     return { topics, atStart: row[4], cursor: topics.length ? String(Math.min(...topics.map(topic => Number(topic.created)))) : '' };
@@ -181,25 +214,34 @@ const ChatAPI = (() => {
         if (topics.has(topic.id)) continue;
         added++;
         const rows = new Map(topic.messages.map(row => [row.messageId, row]));
-        if (rows.size < topic.expectedReplies + 1) {
+        const counted = topic.expectedReplies != null;
+        let reachedStart = false;
+        const pending = () => counted ? rows.size < topic.expectedReplies + 1 : !reachedStart;
+        if (pending()) {
           let cursor = topic.latest;
-          for (let replyPage = 0; replyPage < 2000 && rows.size < topic.expectedReplies + 1; replyPage++) {
+          for (let replyPage = 0; replyPage < 2000 && pending(); replyPage++) {
             signal.throwIfAborted();
             const replies = messagesPage(await call('list_messages', messagesRequest(group, topic.id, cursor)), group, topic.id);
-            if (!replies.length) invalid('thread ended before its advertised reply count');
+            if (!replies.length) {
+              if (counted) invalid('thread ended before its advertised reply count');
+              reachedStart = true;
+              break;
+            }
+            // Replies arrive newest first; the thread's first message is its oldest.
+            reachedStart = replies.some(row => row.messageId === topic.id);
             const next = Math.min(...replies.map(row => Number(row._micros)));
             if (next >= Number(cursor)) invalid('reply pagination stalled');
             for (const row of replies) rows.set(row.messageId, row);
             cursor = String(next);
           }
         }
-        if (!rows.has(topic.id) || rows.size !== topic.expectedReplies + 1) invalid('thread reply count changed or could not be verified');
+        if (!rows.has(topic.id) || (counted ? rows.size !== topic.expectedReplies + 1 : !reachedStart)) invalid('thread reply count changed or could not be verified');
         for (const row of rows.values()) {
           if (messages.has(row.messageId)) invalid('message belongs to multiple topics');
           messages.set(row.messageId, row);
         }
         topics.add(topic.id);
-        if (topic.expectedReplies) threadsScanned++;
+        if (rows.size > 1) threadsScanned++;
       }
       await progress({ pages: pageNumber + 1, topics: topics.size, messages: messages.size, threadsScanned });
       if (page.atStart) { complete = true; break; }
@@ -213,5 +255,5 @@ const ChatAPI = (() => {
       warning: rawCount ? `${rawCount} message(s) contain unfamiliar Chat content, preserved as structured data. The checkpoint will not advance.` : '' };
   }
 
-  return { address, topicsRequest, messagesRequest, topicsPage, messagesPage, collect };
+  return { address, variants, confirms, topicsRequest, messagesRequest, topicsPage, messagesPage, collect };
 })();

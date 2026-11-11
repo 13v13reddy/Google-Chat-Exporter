@@ -24,6 +24,7 @@ test('network export finishes with exact IDs while every Chat tab is hidden and 
   expect(text).toContain('[Message deleted]');
   expect(text).toContain('café 日本語');
   expect(text).not.toContain('Warning:');
+  expect(text).toMatch(/- Quotes message: parent-2\n\n> Quoting Alice — [^\n]+\n>\n> ```text\n> Message 2: café 日本語 <script>literal<\/script>\n> ```\n\n```text\nMessage 3:/);
   expect(app.api.state.calls.filter(call => call.operation === 'list_messages').length).toBeGreaterThanOrEqual(4);
   expect(await app.control.evaluate(id => chrome.tabs.get(id).then(() => true, () => false), result.backgroundTabId)).toBe(false);
   const saved = await app.control.evaluate(() => chrome.storage.local.get(null));
@@ -63,6 +64,56 @@ for (const failure of ['schema', 'policy', 'auth', 'replies', 'stall']) test(`ne
   const storage = await app.control.evaluate(() => chrome.storage.local.get(null));
   expect(Object.keys(storage).filter(key => key.startsWith('gceCheckpoint:') || key.startsWith('gcePending:'))).toEqual([]);
   expect(await app.control.evaluate(id => chrome.tabs.get(id).then(() => true, () => false), result.backgroundTabId)).toBe(false);
+});
+
+for (const route of ['chat', 'dm']) test(`a direct message at an /app/${route}/ link is collected in a hidden tab, not a window`, async ({ app }) => {
+  app.api.state.dm = true;
+  await app.openSource('', route === 'chat');
+  const popup = await app.popup();
+  await popup.locator('#format-select').selectOption('md');
+  const requested = await app.start(popup);
+  expect((await app.jobs()).find(job => job.jobId === requested).collector).toBe('network');
+  const result = await app.finished(requested);
+  expect(result.state, result.text).toBe('done');
+  expect(result.collectionWindowId).toBeUndefined();
+  const text = await fs.readFile((await app.download(result)).filename, 'utf8');
+  expect(new Set(ids(text))).toEqual(new Set(app.api.expected()));
+  expect(ids(text)).toHaveLength(app.api.expected().length);
+  expect(text).toContain('[Message deleted]');
+  const rejected = route === 'chat' ? 1 : 0;
+  expect(app.api.state.calls.slice(0, rejected + 1).map(call => JSON.stringify(call.body[7])))
+    .toEqual([...(rejected ? ['[["ROOM"]]'] : []), '[null,null,["ROOM"]]']);
+  expect(app.api.state.calls.filter(call => call.operation === 'list_messages').every(call => JSON.stringify(call.body[0][3][2]) === '[null,null,["ROOM"]]')).toBe(true);
+  expect(await app.control.evaluate(id => chrome.tabs.get(id).then(() => true, () => false), result.backgroundTabId)).toBe(false);
+});
+
+test('a meeting chat without reply counts exports every message and reply', async ({ app }) => {
+  app.api.state.uncounted = true;
+  await app.openSource('', true);
+  const popup = await app.popup();
+  await popup.locator('#format-select').selectOption('md');
+  const result = await app.finished(await app.start(popup));
+  expect(result.state, result.text).toBe('done');
+  const text = await fs.readFile((await app.download(result)).filename, 'utf8');
+  expect(new Set(ids(text))).toEqual(new Set(app.api.expected()));
+  expect(ids(text)).toHaveLength(app.api.expected().length);
+  expect(text).not.toContain('Warning:');
+});
+
+test('an ambiguous Chat link the space reader cannot open uses the rendered collection window', async ({ app }) => {
+  app.api.state.failure = 'missing';
+  await app.openSource('', true);
+  const popup = await app.popup();
+  await popup.locator('#format-select').selectOption('md');
+  const requested = await app.start(popup);
+  const current = (await app.jobs()).find(job => job.jobId === requested);
+  expect(current.collector).not.toBe('network');
+  const result = await app.finished(requested);
+  expect(result.state, result.text).toBe('done');
+  expect(result.collectionWindowId).toBeDefined();
+  expect(result.backgroundTabId).toBeUndefined();
+  expect(app.api.state.calls.map(call => call.operation)).toEqual(['list_topics', 'list_topics', 'list_topics']);
+  expect(ids(await fs.readFile((await app.download(result)).filename, 'utf8')).length).toBeGreaterThan(0);
 });
 
 test('network cancellation during a slow response closes only its helper and stays cancelled', async ({ app }) => {

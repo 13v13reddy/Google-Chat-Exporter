@@ -186,6 +186,33 @@ for (const target of ['chrome', 'firefox']) {
     assert.equal(hosts.at(-1).isConnected, false);
   });
 
+  test(`${target}: notifications still close after the extension reloads under an open Chat page`, () => {
+    const c = loadContent(target);
+    const hosts = installProgressDom(c);
+    let result, dismiss;
+    c.mountExportResult = (_host, value, onClose) => { result = value; dismiss = onClose; };
+    const send = job => c.chrome.runtime.onMessage.listener({ action: 'exportJobUpdate', job }, {}, () => {});
+    const invalidate = () => { c.chrome.runtime.sendMessage = () => { throw new Error('Extension context invalidated.'); }; };
+    for (const job of [
+      { jobId: 'job-failed', startedAt: 1, revision: 1, state: 'error', phase: 'failed', text: 'Export failed: Chat did not load in the export window.', percent: 0 },
+      { jobId: 'job-working', startedAt: 2, revision: 1, state: 'working', phase: 'history', text: 'Loading history', percent: 10 }
+    ]) {
+      c.chrome.runtime.sendMessage = async () => ({});
+      send(job);
+      const progress = hosts.at(-1);
+      assert.equal(progress.isConnected, true);
+      invalidate();
+      progress.querySelector('.gce-close').handlers.get('click')();
+      assert.equal(progress.isConnected, false, `${job.state} notification closes without the extension`);
+    }
+    c.chrome.runtime.sendMessage = async () => ({});
+    send({ jobId: 'job-saved', startedAt: 3, revision: 1, state: 'done', phase: 'complete', downloadId: 42, filename: 'Fixture.md' });
+    assert.equal(result.downloadId, 42);
+    invalidate();
+    dismiss();
+    assert.equal(hosts.at(-1).isConnected, false, 'saved-file card closes without the extension');
+  });
+
   test(`${target}: content ping reports missing helpers to the background`, () => {
     const c = loadContent(target, { includeTheme: false });
     c.mountExportResult = () => {};

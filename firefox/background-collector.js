@@ -51,6 +51,40 @@ const BackgroundCollector = (() => {
     } finally { clearTimeout(timeout); }
   }
 
+  // Ask the already loaded source frame for the first history page, without
+  // the hidden tab, so ambiguous /app/chat/<id> links and DMs use the ID form
+  // Chat actually answers for this conversation.
+  async function probe(sourceTabId, frame, group) {
+    let timer;
+    try {
+      const results = await Promise.race([
+        chrome.scripting.executeScript({ target: { tabId: sourceTabId, frameIds: [frame.frameId || 0] }, world: 'MAIN', func: pageRead,
+          args: [{ operation: 'list_topics', group, body: ChatAPI.topicsRequest(group) }] }),
+        new Promise(resolve => { timer = setTimeout(resolve, 10000); })
+      ]);
+      return results?.[0]?.result || null;
+    } catch { return null; } finally { clearTimeout(timer); }
+  }
+
+  // Returns the conversation to collect in the background, or null to use the
+  // rendered collection path. Explicit space routes need no probe.
+  async function resolve(sourceTabId, frame, href) {
+    const group = ChatAPI.address(href);
+    if (!group) return null;
+    const options = ChatAPI.variants(group);
+    if (!['chat', 'dm'].includes(group.kind)) return options[0];
+    let fallback = group.supported ? options[0] : null;
+    for (const option of options) {
+      const result = await probe(sourceTabId, frame, option);
+      if (ChatAPI.confirms(result?.data, option)) return option;
+      // Only a not-found/bad-request answer says this ID form is wrong.
+      // Anything else (no frame access, sign-in, empty history) cannot tell.
+      if (![400, 404].includes(result?.status)) return fallback;
+      if (option === fallback) fallback = null;
+    }
+    return null;
+  }
+
   async function read(tabId, group, signal, operation, body = null, media = null) {
     for (let attempt = 0; attempt < 3; attempt++) {
       signal.throwIfAborted();
@@ -116,9 +150,9 @@ const BackgroundCollector = (() => {
     return fingerprints.length <= 5000 ? { timestamp, fingerprints, undatedFingerprints: [] } : null;
   }
 
-  async function start(sourceTabId, frame, format, settings, jobId, packagePayload) {
-    const group = ChatAPI.address(frame.conversationUrl || settings.sourceUrl);
-    if (!group?.supported) throw new Error('This conversation does not support background history collection.');
+  async function start(sourceTabId, frame, format, settings, jobId, packagePayload, resolved = null) {
+    const group = resolved || ChatAPI.address(frame.conversationUrl || settings.sourceUrl);
+    if (!resolved && !group?.supported) throw new Error('This conversation does not support background history collection.');
     const existing = await ExportJobs.getJob(jobId);
     if (existing) {
       if (existing.sourceTabId === sourceTabId && ['working', 'paused'].includes(existing.state)) return { received: true, jobId };
@@ -225,5 +259,5 @@ const BackgroundCollector = (() => {
     }
   }
 
-  return { start, pageRead };
+  return { start, resolve, pageRead };
 })();

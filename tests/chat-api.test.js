@@ -61,8 +61,11 @@ for (const target of ['chrome', 'firefox']) {
     foreign[0][2][0][0] = 'another-space';
     assert.throws(() => api.topicsPage([['dfe.t.lt', [foreign], null, null, true, true]], address), /conversation/i);
     const invalid = topic();
-    invalid[10][12] = null;
+    invalid[10][12] = ['many'];
     assert.throws(() => api.topicsPage([['dfe.t.lt', [invalid], null, null, true, true]], address), /reply count/i);
+    const uncounted = topic();
+    uncounted[10] = null;
+    assert.equal(api.topicsPage([['dfe.t.lt', [uncounted], null, null, true, true]], address).topics[0].expectedReplies, null);
   });
 
   test(`${target}: API messages preserve deletion placeholders, sender, UTF-8, attachment metadata and parent IDs`, () => {
@@ -87,6 +90,29 @@ for (const target of ['chrome', 'firefox']) {
     assert.throws(() => api.messagesPage([['dfe.m.lm', [message('wrong', 'other')]]], address, 'parent'), /thread/i);
   });
 
+  test(`${target}: quoted replies keep the quoted sender, time and full text`, () => {
+    const api = fixture(target);
+    const address = api.address('https://chat.google.com/app/chat/space');
+    const quote = Array(16).fill(null);
+    quote[0] = [[null, null, null, [null, 'original', [['space']]]], 'original'];
+    quote[1] = '1762879000000000';
+    quote[4] = [['user'], 'Quoted Person', 'https://lh3.googleusercontent.com/avatar'];
+    quote[5] = 'Original text with https://docs.google.com/document/d/abc';
+    const marker = Array(28).fill(null); marker[0] = 28;
+    const [reply, quoteOnly, plain] = api.messagesPage([['dfe.m.lm', [
+      message('reply', 'parent', 'My answer', { 10: [marker], 36: quote }),
+      message('quote-only', 'parent', '', { 36: quote }),
+      message('plain', 'parent', 'No quote')
+    ]]], address, 'parent');
+    assert.equal(reply.text, 'My answer');
+    assert.equal(JSON.stringify(reply.quote), JSON.stringify({ messageId: 'original', sender: 'Quoted Person',
+      text: 'Original text with https://docs.google.com/document/d/abc', timestamp: '2025-11-11T16:36:40.000Z' }));
+    assert.equal(reply.media.length, 0); assert.equal(reply.rawContent, false);
+    assert.equal(quoteOnly.rawContent, false); assert.equal(quoteOnly.text, '');
+    assert.equal('quote' in plain, false);
+    assert.throws(() => api.messagesPage([['dfe.m.lm', [message('bad', 'parent', 'x', { 36: ['not a quote'] })]]], address, 'parent'), /quoted message/);
+  });
+
   test(`${target}: API traversal pages old topics and missing replies before declaring completion`, async () => {
     const api = fixture(target), group = api.address('https://chat.google.com/app/chat/space');
     const recent = topic('recent', 0); recent[6] = [message('recent', 'recent')];
@@ -109,6 +135,32 @@ for (const target of ['chrome', 'firefox']) {
     assert.equal(calls[2].operation, 'list_messages');
     assert.equal(calls[2].body[3][2], 1700000000000004);
     assert.equal(counts.at(-1).messages, 4);
+  });
+
+  test(`${target}: threads without a reply count (meeting chats) are read back to their first message`, async () => {
+    const api = fixture(target), group = api.address('https://chat.google.com/app/chat/space');
+    const at = (row, time) => { row[2] = time; return row; };
+    const flat = topic('flat'); flat[10] = null; flat[6] = [at(message('flat', 'flat'), '1700000000000009')];
+    flat[1] = flat[14] = '1700000000000009';
+    const threaded = topic('parent'); threaded[10] = null; threaded[6] = [at(message('parent'), '1700000000000001')];
+    threaded[1] = '1700000000000005'; threaded[14] = '1700000000000001';
+    const replies = { flat: [[at(message('flat', 'flat'), '1700000000000009')], []],
+      parent: [[at(message('reply-2'), '1700000000000005'), at(message('reply-1'), '1700000000000003')], [at(message('parent'), '1700000000000001')]] };
+    const calls = [];
+    const result = await api.collect(group, async (operation, body) => {
+      if (operation === 'list_topics') return [['dfe.t.lt', [flat, threaded], null, null, true, true]];
+      const thread = body[0][3][1]; calls.push(thread);
+      return [['dfe.m.lm', replies[thread].shift() || []]];
+    }, async () => {}, new AbortController().signal);
+    assert.deepEqual([...result.messages.map(row => row.messageId)], ['flat', 'parent', 'reply-1', 'reply-2']);
+    assert.deepEqual([...calls], ['flat', 'parent', 'parent'], 'each uncounted thread stops at its first message');
+    assert.equal(result.threadsScanned, 1);
+    assert.equal(result.warning, '');
+    // Without the first message, an uncounted thread is never declared complete.
+    const orphan = topic('lost'); orphan[10] = null; orphan[6] = [at(message('reply-x', 'lost'), '1700000000000004')];
+    orphan[1] = '1700000000000004'; orphan[14] = '1700000000000001';
+    await assert.rejects(api.collect(group, async operation => operation === 'list_topics'
+      ? [['dfe.t.lt', [orphan], null, null, true, true]] : [['dfe.m.lm', []]], async () => {}, new AbortController().signal), /could not be verified/);
   });
 
   test(`${target}: stalled history, missing parents, changed counts and cancellation cannot produce a complete result`, async () => {

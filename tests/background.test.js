@@ -745,6 +745,34 @@ for (const target of ['chrome', 'firefox']) {
     }
   });
 
+  test(`${target}: TXT, Markdown, and HTML show quoted messages above the reply, safely`, async () => {
+    const c = loadBackground(target);
+    const quoted = 'Also <b>raw</b> ``` fence\nsee https://docs.google.com/document/d/abc';
+    const payload = { conversationName: 'Synthetic DM', exportDate: '2026-11-11T12:00:00Z', messages: [
+      { messageId: 'reply', sender: 'Veera', absoluteTimestamp: 300, timestamp: '2026-11-11T16:37:44.697Z', text: 'I reached out to Ted', media: [],
+        quote: { messageId: 'original', sender: 'Joshua', timestamp: '2026-11-11T16:36:34.186Z', text: quoted } },
+      { messageId: 'quote-only', sender: 'Veera', absoluteTimestamp: 400, text: '', media: [], quote: { messageId: 'gone', sender: 'Unknown', text: '' } }
+    ] };
+    const markdown = c.generateMarkdown(payload);
+    assert.match(markdown, /- Quotes message: original/);
+    assert.match(markdown, /> Quoting Joshua — 2026-11-11T16:36:34.186Z\n>\n> ````text\n> Also <b>raw<\/b> ``` fence\n> see https:\/\/docs.google.com\/document\/d\/abc\n> ````/);
+    assert.ok(markdown.indexOf('Quoting Joshua') < markdown.indexOf('I reached out to Ted'));
+    assert.match(markdown, /> \[No text\]/);
+    const html = c.generateHtml(payload);
+    assert.match(html, /<blockquote class="quote" data-quoted-message-id="original"><div class="quote-sender">Joshua<\/div>/);
+    assert.match(html, /Also &lt;b&gt;raw&lt;\/b&gt;/);
+    assert.doesNotMatch(html, /<b>raw<\/b>/);
+    assert.match(html, /<a href="https:\/\/docs.google.com\/document\/d\/abc"/);
+    assert.ok(html.indexOf('quote-sender') < html.indexOf('I reached out to Ted'));
+    assert.doesNotMatch(html, /\[Empty message\]/, 'a quote-only reply is not empty');
+    assert.match(c.generateCss(), /\.quote\{/);
+    let download;
+    c.chrome.downloads.download = (options, callback) => { download = options; callback(1); };
+    await c.packageTxt(payload);
+    const txt = Buffer.from(download.url.split(',')[1], 'base64').toString();
+    assert.match(txt, /Veera: I reached out to Ted\n  ┃ Quoting Joshua \[2026-11-11T16:36:34.186Z\]:\n  ┃ Also <b>raw<\/b> ``` fence\n  ┃ see https:\/\/docs.google.com\/document\/d\/abc\n/);
+  });
+
   test(`${target}: TXT, Markdown, and HTML group replies with their parent context`, async () => {
     const c = loadBackground(target);
     const payload = {

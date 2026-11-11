@@ -345,17 +345,19 @@ async function triggerExport(contextMenuTab, format, overrides = {}, requestedJo
   const settings = { ...await getSettings(), ...overrides };
   settings.sourceUrl = (await chrome.tabs.get(targetTabId)).url;
   const jobId = /^job-[a-zA-Z0-9-]{1,96}$/.test(requestedJobId) ? requestedJobId : `job-${crypto.randomUUID()}`;
-  if ((settings.loadAll !== false || settings.incremental) && typeof BackgroundCollector !== 'undefined' &&
-      typeof chrome.tabs.create === 'function' && ChatAPI.address(frame.conversationUrl || settings.sourceUrl)?.supported) {
+  const fullHistory = settings.loadAll !== false || settings.incremental;
+  const href = frame.conversationUrl || settings.sourceUrl;
+  const network = fullHistory && typeof BackgroundCollector !== 'undefined' &&
+    typeof chrome.tabs.create === 'function' && !!ChatAPI.address(href);
+  const windowed = fullHistory && typeof chrome.windows?.create === 'function';
+  if (network || windowed) {
     if (collectionStarts.has(jobId)) return collectionStarts.get(jobId);
-    const pending = BackgroundCollector.start(targetTabId, frame, format, settings, jobId, packageExportPayload);
-    collectionStarts.set(jobId, pending);
-    try { return await pending; }
-    finally { collectionStarts.delete(jobId); }
-  }
-  if ((settings.loadAll !== false || settings.incremental) && typeof chrome.windows?.create === 'function') {
-    if (collectionStarts.has(jobId)) return collectionStarts.get(jobId);
-    const pending = startCollectionWindow(targetTabId, frame, format, settings, jobId);
+    const pending = (async () => {
+      const group = network ? await BackgroundCollector.resolve(targetTabId, frame, href) : null;
+      if (group) return BackgroundCollector.start(targetTabId, frame, format, settings, jobId, packageExportPayload, group);
+      if (windowed) return startCollectionWindow(targetTabId, frame, format, settings, jobId);
+      return sendExportCommand(targetTabId, frame.frameId, format, settings, jobId);
+    })();
     collectionStarts.set(jobId, pending);
     try { return await pending; }
     finally { collectionStarts.delete(jobId); }
@@ -653,6 +655,10 @@ async function packageTxt({ conversationName, messages, exportDate, history }) {
       if (msg.contextOnly) body += '[Parent context from earlier history]\n';
       if (msg.parentMessageId) body += `[Reply to ${msg.parentMessageId}]\n`;
       body += `[${msg.timestamp || '—'}] ${msg.sender || 'Unknown'}: ${msg.text || ''}`;
+      if (msg.quote) {
+        body += `\n  ┃ Quoting ${msg.quote.sender || 'Unknown'}${msg.quote.timestamp ? ` [${msg.quote.timestamp}]` : ''}:`;
+        for (const quoted of (msg.quote.text || '[No text]').replace(/\r\n?/g, '\n').split('\n')) body += `\n  ┃ ${quoted}`;
+      }
 
       if (msg.media && msg.media.length > 0) {
         for (const m of msg.media) {
@@ -724,7 +730,15 @@ function generateMarkdown({ conversationName, messages, exportDate, history }) {
       if (msg.messageId) lines.push(`- Message ID: ${escapeMarkdownLabel(msg.messageId)}`);
       if (msg.parentMessageId) lines.push(`- Reply to: ${escapeMarkdownLabel(msg.parentMessageId)}`);
       if (msg.contextOnly) lines.push('- Parent context from earlier history');
-      if (msg.messageId || msg.parentMessageId || msg.contextOnly) lines.push('');
+      if (msg.quote?.messageId) lines.push(`- Quotes message: ${escapeMarkdownLabel(msg.quote.messageId)}`);
+      if (msg.messageId || msg.parentMessageId || msg.contextOnly || msg.quote?.messageId) lines.push('');
+
+      if (msg.quote) {
+        const quoted = (msg.quote.text || '[No text]').replace(/\r\n?/g, '\n');
+        const quoteFence = '`'.repeat((quoted.match(/`+/g) || []).reduce((length, run) => Math.max(length, run.length + 1), 3));
+        lines.push(`> Quoting ${escapeMarkdownLabel(msg.quote.sender || 'Unknown')}${msg.quote.timestamp ? ` — ${escapeMarkdownLabel(msg.quote.timestamp)}` : ''}`,
+          '>', `> ${quoteFence}text`, ...quoted.split('\n').map(line => `> ${line}`), `> ${quoteFence}`, '');
+      }
 
       if (msg.text) {
         // Preserve chat text literally, including HTML and nested code fences.
@@ -825,8 +839,9 @@ function generateHtml({ conversationName, messages, exportDate, history }) {
       const timeHtml = msg.timestamp ? `<div class="time">${esc(msg.timestamp)}</div>` : '';
 
       let contentHtml = '';
-      if (msg.text) {
-        contentHtml += `<div class="bubble"><div class="text">${formatTextContent(msg.text)}</div>${timeHtml}</div>`;
+      const quoteHtml = msg.quote ? `<blockquote class="quote" data-quoted-message-id="${esc(msg.quote.messageId || '')}"><div class="quote-sender">${esc(msg.quote.sender || 'Unknown')}</div><div class="text">${formatTextContent(msg.quote.text || '[No text]')}</div></blockquote>` : '';
+      if (msg.text || quoteHtml) {
+        contentHtml += `<div class="bubble">${quoteHtml}${msg.text ? `<div class="text">${formatTextContent(msg.text)}</div>` : ''}${timeHtml}</div>`;
       }
 
       if (msg.media && msg.media.length > 0) {
@@ -974,6 +989,9 @@ header p{font-size:12px;color:#5f6368;margin-top:2px}
 .thread-title{font-size:12px;font-weight:500;color:#5f6368;overflow-wrap:anywhere}
 .msg-reply{margin-left:12px;padding-left:12px;border-left:2px solid #d2e3fc}
 .context-note{font-size:11px;color:#5f6368;margin-top:8px}
+.quote{margin:2px 0 8px;padding:6px 10px;border-left:3px solid #8ab4f8;border-radius:8px;background:rgba(255,255,255,0.6)}
+.quote-sender{font-size:11.5px;font-weight:600;color:#3c4043;margin-bottom:2px}
+.quote .text{font-size:13px;color:#3c4043}
 .date-sep{text-align:center;margin:20px 0 12px}
 .date-sep span{background:#e8eaed;padding:4px 16px;font-size:11px;color:#5f6368;border-radius:16px;font-weight:500;letter-spacing:.3px}
 .msg{display:flex;flex-direction:column;margin-bottom:2px}

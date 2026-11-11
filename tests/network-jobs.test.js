@@ -262,6 +262,54 @@ for (const target of ['chrome', 'firefox']) {
     assert.equal(f.pageMessages.some(call => call.message.action !== 'exportJobUpdate'), false);
   });
 
+  test(`${target}: ambiguous links and DMs use only the conversation ID form Chat confirms`, async () => {
+    const f = fixture(target);
+    for (const name of ['chat-api.js', 'background-collector.js']) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, name), 'utf8'), f.context);
+    const collector = vm.runInContext('BackgroundCollector', f.context), calls = [];
+    let answer;
+    f.chrome.scripting = { async executeScript(details) {
+      const { group } = details.args[0];
+      calls.push({ tabId: details.target.tabId, frames: JSON.stringify(details.target.frameIds), world: details.world,
+        operation: details.args[0].operation, ref: JSON.stringify(details.args[0].body[7]), account: group.account });
+      const result = answer(JSON.parse(JSON.stringify(group.ref)));
+      if (result instanceof Error) throw result;
+      return [{ result }];
+    } };
+    const page = ref => ({ data: [['dfe.t.lt', [[[null, 'topic', ref]]], null, null, true, true]] });
+    const notFound = { status: 404, error: 'Chat read request failed (HTTP 404). Please retry.' };
+    const frame = { frameId: 3 };
+    const dmRef = JSON.stringify([null, null, ['DMID']]);
+    answer = ref => JSON.stringify(ref) === dmRef ? page(ref) : notFound;
+    const dm = await collector.resolve(7, frame, 'https://chat.google.com/u/1/app/chat/DMID');
+    assert.equal(dm.kind, 'dm'); assert.equal(JSON.stringify(dm.ref), dmRef);
+    assert.equal(dm.url, 'https://chat.google.com/u/1/dm/DMID');
+    assert.deepEqual(calls.map(call => call.ref), ['[["DMID"]]', dmRef]);
+    assert.equal(calls[0].tabId, 7); assert.equal(calls[0].frames, '[3]'); assert.equal(calls[0].world, 'MAIN');
+    assert.equal(calls[0].operation, 'list_topics'); assert.equal(calls[0].account, '1');
+    calls.length = 0;
+    assert.equal((await collector.resolve(7, frame, 'https://mail.google.com/mail/u/0/#chat/dm/DMID')).kind, 'dm');
+    assert.deepEqual(calls.map(call => call.ref), [JSON.stringify([null, null, ['DMID']])]);
+    // A topic in another ID slot, or every form rejected, never selects a form.
+    answer = () => page([['DMID']]);
+    assert.equal(await collector.resolve(7, frame, 'https://chat.google.com/u/1/dm/DMID'), null);
+    answer = () => notFound;
+    assert.equal(await collector.resolve(7, frame, 'https://chat.google.com/u/1/app/chat/DMID'), null);
+    // When the probe cannot tell forms apart, ambiguous links keep the space reader.
+    answer = ref => page(ref);
+    assert.equal(JSON.stringify((await collector.resolve(7, frame, 'https://chat.google.com/u/1/app/chat/SPACE')).ref), '[["SPACE"]]');
+    answer = () => ({ status: 401, error: 'Chat read request failed (HTTP 401). Please retry.' });
+    calls.length = 0;
+    assert.equal(JSON.stringify((await collector.resolve(7, frame, 'https://chat.google.com/u/1/app/chat/SPACE')).ref), '[["SPACE"]]');
+    assert.equal(calls.length, 1, 'only not-found or bad-request answers try another form');
+    answer = () => new Error('Cannot access contents of the page');
+    assert.equal((await collector.resolve(7, frame, 'https://chat.google.com/u/1/app/chat/SPACE')).kind, 'chat');
+    assert.equal(await collector.resolve(7, frame, 'https://chat.google.com/u/1/dm/DMID'), null);
+    calls.length = 0;
+    assert.equal((await collector.resolve(7, frame, 'https://chat.google.com/u/1/room/SPACE')).kind, 'room');
+    assert.equal((await collector.resolve(7, frame, 'https://mail.google.com/mail/u/0/#chat/space/SPACE')).kind, 'space');
+    assert.equal(calls.length, 0, 'explicit space routes are not probed');
+  });
+
   test(`${target}: page-context requests are read-only, bounded, and never return the session token`, async () => {
     const f = fixture(target);
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', target, 'background-collector.js'), 'utf8'), f.context);

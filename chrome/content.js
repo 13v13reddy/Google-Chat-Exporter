@@ -279,11 +279,9 @@ function renderProgress(text, percent, state) {
         showProgress('Cancelling export...', 0);
         exportController.abort();
       } else if (mirroredExportJob && ['working', 'paused'].includes(mirroredExportJob.state) && !['packaging', 'download'].includes(mirroredExportJob.phase)) {
-        chrome.runtime.sendMessage({ action: 'cancelExportJob', jobId: mirroredExportJob.jobId }).catch(() => {});
+        if (!sendToExtension({ action: 'cancelExportJob', jobId: mirroredExportJob.jobId })) hideProgress();
       } else {
-        if (progressJobId && !exportInProgress) {
-          chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId: progressJobId }).catch(() => {});
-        }
+        if (progressJobId && !exportInProgress) sendToExtension({ action: 'acknowledgeExportJob', jobId: progressJobId });
         hideProgress();
       }
     });
@@ -315,6 +313,13 @@ function renderProgress(text, percent, state) {
     closeButton.textContent = '×';
   }
 
+}
+
+// After the extension reloads, Chat keeps this older script and its runtime
+// calls throw synchronously. Notification controls must still work.
+function sendToExtension(message) {
+  try { chrome.runtime.sendMessage(message).catch(() => {}); return true; }
+  catch { return false; }
 }
 
 function hideProgress() {
@@ -351,7 +356,7 @@ function renderExportResult(result, warning = '', auto = false, jobId = exportJo
     progressIsResult = true;
     progressThemeCleanup = bindProgressTheme(progressEl);
     progressCleanup = mountExportResult(progressEl, { ...result, warning, auto }, () => {
-      if (jobId) chrome.runtime.sendMessage({ action: 'acknowledgeExportJob', jobId }).catch(() => {});
+      if (jobId) sendToExtension({ action: 'acknowledgeExportJob', jobId });
       hideProgress();
     });
     document.documentElement.appendChild(progressEl);
